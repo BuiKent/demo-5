@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/homeFragment">
+
+    <fragment
+        android:id="@+id/homeFragment"
+        android:name="com.example.realtalkenglishwithAI.fragment.HomeFragment"
+        android:label="Home"
+        tools:layout="@layout/fragment_home">
+        <!-- Action to navigate directly from Home to Reading Screen -->
+        <action
+            android:id="@+id/action_homeFragment_to_storyReadingFragment"
+            app:destination="@id/storyReadingFragment" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/practiceFragment"
+        android:name="com.example.realtalkenglishwithAI.fragment.PracticeFragment"
+        android:label="Practice"
+        tools:layout="@layout/fragment_practice" />
+
+    <fragment
+        android:id="@+id/progressFragment"
+        android:name="com.example.realtalkenglishwithAI.fragment.ProgressFragment"
+        android:label="Progress"
+        tools:layout="@layout/fragment_progress" />
+
+    <fragment
+        android:id="@+id/profileFragment"
+        android:name="com.example.realtalkenglishwithAI.fragment.ProfileFragment"
+        android:label="Profile"
+        tools:layout="@layout/fragment_profile" />
+
+    <fragment
+        android:id="@+id/storyReadingFragment"
+        android:name="com.example.realtalkenglishwithAI.fragment.StoryReadingFragment"
+        android:label="Read Story" 
+        tools:layout="@layout/fragment_story_reading">
+        <!-- Argument without a default value MUST be declared first. -->
+        <argument
+            android:name="story_content"
+            app:argType="string" />
+        <argument
+            android:name="story_title"
+            app:argType="string"
+            android:defaultValue="Story" />
+    </fragment>
+
+    <!-- This fragment is now orphaned, as HomeFragment navigates directly to StoryReadingFragment. -->
+    <!-- It can be removed if it's no longer needed anywhere. -->
+    <fragment
+        android:id="@+id/storyFragment"
+        android:name="com.example.realtalkenglishwithAI.fragment.StoryFragment"
+        android:label="Stories"
+        tools:layout="@layout/fragment_story">
+        <action
+            android:id="@+id/action_storyFragment_to_storyReadingFragment"
+            app:destination="@id/storyReadingFragment" />
+    </fragment>
+
+</navigation>
