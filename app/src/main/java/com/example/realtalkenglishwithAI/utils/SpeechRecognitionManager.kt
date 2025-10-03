@@ -186,7 +186,7 @@ class SpeechRecognitionManager(
             if (isPerformingGracefulRestart && error == SpeechRecognizer.ERROR_CLIENT) {
                 Log.d(TAG, "Graceful restart: Ignored expected ERROR_CLIENT. Restarting after delay.")
                 isPerformingGracefulRestart = false
-                mainHandler.postDelayed({ restartListeningLoop() }, 750L) // Crucial delay
+                mainHandler.postDelayed({ restartListeningLoop() }, 450L) // Crucial delay
                 return
             }
             isPerformingGracefulRestart = false // Reset flag on any other error
@@ -197,7 +197,7 @@ class SpeechRecognitionManager(
                 Log.w(TAG, "Recognizer busy. Consecutive error count: $busyErrorCounter")
 
                 // If we get too many busy errors, disable the biasing feature permanently.
-                if (isBiasingSupported && busyErrorCounter >= 3) {
+                if (isBiasingSupported && busyErrorCounter >= 1) {
                     Log.e(TAG, "Too many consecutive busy errors. Disabling biasing feature permanently.")
                     isBiasingSupported = false
                     prefs.edit().putBoolean(PREF_KEY_BIASING_SUPPORT, false).apply()
