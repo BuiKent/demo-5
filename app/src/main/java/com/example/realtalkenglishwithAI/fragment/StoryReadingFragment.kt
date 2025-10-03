@@ -39,8 +39,10 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     private var _binding: FragmentStoryReadingBinding? = null
     private val binding get() = _binding!!
 
-    // --- Config --- //
-    private val isPhase0Enabled = true // MASTER SWITCH
+    // --- Phase 3: Experimentation System --- //
+    private lateinit var experimentManager: ABExperimentManager
+    private lateinit var featureFlags: LocalFeatureFlagController
+    private lateinit var metrics: MetricsEmitter
 
     // --- Speech Recognition --- //
     private lateinit var speechManager: SpeechRecognitionManager
@@ -124,7 +126,14 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         super.onViewCreated(view, savedInstanceState)
         if (currentStoryContent == null || currentStoryTitle == null) return
 
+        // --- Phase 3: Setup Experimentation --- //
         sharedPreferences = requireActivity().getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        featureFlags = LocalFeatureFlagController()
+        metrics = LogcatMetricsCollector("RealTalkMetrics")
+        experimentManager = ABExperimentManager(sharedPreferences, featureFlags)
+        experimentManager.setupExperiment()
+        // --- End of Experimentation Setup --- //
+
         difficultyLevel = sharedPreferences.getInt("DIFFICULTY_LEVEL", 1)
 
         sequenceAligner = SequenceAligner()
@@ -144,8 +153,8 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         speechManager = SpeechRecognitionManager(requireContext(), this, sharedPreferences)
     }
 
-    private fun initializePhase0() {
-        if (!isPhase0Enabled) return
+    private fun initializeHybridSystem() {
+        if (!featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) return
         val storyWords = allWordInfosInStory.map { it.normalizedText }
         val currentMode = when(difficultyLevel) {
             0 -> DebtMode.BEGINNER
@@ -157,16 +166,20 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         strictManager = StrictCorrectionManager()
 
         phase0Manager = Phase0Manager(storyWords, this, currentMode).apply {
-            this.collector = CheapBackgroundCollector(this, currentMode)
-            this.strictManager = this@StoryReadingFragment.strictManager
+            if (featureFlags.isEnabled(FeatureFlag.CHEAP_COLLECTOR)) {
+                this.collector = CheapBackgroundCollector(this, currentMode)
+            }
+            if (featureFlags.isEnabled(FeatureFlag.STRICT_CORRECTION)) {
+                this.strictManager = this@StoryReadingFragment.strictManager
+            }
         }
-        Log.d(TAG, "Phase 0/1/2 system initialized with ${storyWords.size} words.")
+        metrics.emit("system_initialized", mapOf("system" to "hybrid", "word_count" to storyWords.size))
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
-        if (isPhase0Enabled) {
-            phase0Manager?.reset() 
+        if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) {
+            phase0Manager?.reset()
         } else {
             deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacksAndMessages(null) }
         }
@@ -180,7 +193,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     override fun onPartialResults(transcript: String) {
         activity?.runOnUiThread {
-            if (isPhase0Enabled) {
+            if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) {
                 val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
                 phase0Manager?.onRecognizedWords(tokens)
             } else {
@@ -195,7 +208,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     override fun onFinalResults(transcript: String) {
         activity?.runOnUiThread {
-            if (isPhase0Enabled) {
+            if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) {
                 val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
                 phase0Manager?.onRecognizedWords(tokens)
             } else {
@@ -219,7 +232,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         }
     }
 
-    // --- DebtUI Interface Implementation (Main Thread Safe) --- //
+    // --- DebtUI Interface Implementation --- //
 
     override fun markWord(index: Int, color: DebtUI.Color, locked: Boolean) {
         activity?.runOnUiThread {
@@ -259,13 +272,14 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     override fun onAdvanceCursorTo(index: Int) {
         activity?.runOnUiThread {
-            if (!isPhase0Enabled) return@runOnUiThread
-            updateStoryWordFocus(index)
+            if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) {
+                updateStoryWordFocus(index)
+            }
         }
     }
 
     override fun logMetric(key: String, value: Any) {
-        Log.d(TAG, "Phase0Metric - $key: $value")
+        metrics.emit(key, mapOf("value" to value))
     }
 
     // --- UI Update and Management --- //
@@ -303,15 +317,17 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             }
         }
 
-        if (isPhase0Enabled) {
-            initializePhase0()
+        if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) {
+            initializeHybridSystem()
+        } else {
+            metrics.emit("system_initialized", mapOf("system" to "legacy", "word_count" to allWordInfosInStory.size))
         }
     }
 
     private fun resetAllWordStatesAndColors() {
-        if (isPhase0Enabled) {
+        if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) {
             phase0Manager?.reset()
-            initializePhase0()
+            initializeHybridSystem()
         } else {
             synchronized(wordStateLock) {
                 deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
@@ -332,12 +348,12 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     private fun updateStoryWordFocus(newFocusGlobalIndex: Int) {
         val oldFocusIndex = currentFocusedWordGlobalIndex
-        if (oldFocusIndex == newFocusGlobalIndex && !isPhase0Enabled) return
+        if (oldFocusIndex == newFocusGlobalIndex && !featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) return
         currentFocusedWordGlobalIndex = newFocusGlobalIndex
 
         if (oldFocusIndex != -1) {
             allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
-                val isOldWordCorrect = if (isPhase0Enabled) phase0Manager?.wordStates?.getOrNull(oldFocusIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else oldWord.status == WordMatchStatus.CORRECT
+                val isOldWordCorrect = if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) phase0Manager?.wordStates?.getOrNull(oldFocusIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else oldWord.status == WordMatchStatus.CORRECT
                 if (!isOldWordCorrect) {
                     updateWordSpan(oldWord, colorDefaultText, null)
                 }
@@ -346,7 +362,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
         if (newFocusGlobalIndex != -1) {
             allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
-                val isNewWordCorrect = if (isPhase0Enabled) phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else newWord.status == WordMatchStatus.CORRECT
+                val isNewWordCorrect = if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else newWord.status == WordMatchStatus.CORRECT
                 if (!isNewWordCorrect) {
                     updateWordSpan(newWord, colorDefaultText, colorFocusBackground)
                 }
