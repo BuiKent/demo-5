@@ -54,6 +54,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     private val allWordInfosInStory = mutableListOf<WordInfo>()
     @Volatile private var currentFocusedWordGlobalIndex: Int = -1
     private var difficultyLevel = 1 // 0: Beginner, 1: Intermediate, 2: Advanced
+    private var wordFocusUpdateCounter = 0 // Đếm số lần con trỏ di chuyển để giảm tần suất cập nhật biasing
 
     // --- UI Colors & ASR Biasing Constants ---
     private var colorDefaultText: Int = Color.BLACK
@@ -281,8 +282,11 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         val oldFocusIndex = currentFocusedWordGlobalIndex
         if (oldFocusIndex == newFocusGlobalIndex) return
 
-        // Gọi hàm "mớm lời" ngay khi con trỏ thay đổi.
-        updateAsrBiasing(newFocusGlobalIndex)
+        // Đánh đổi thông minh: Chỉ cập nhật "mớm lời" mỗi 5 từ để cải thiện độ mượt.
+        wordFocusUpdateCounter++
+        if (newFocusGlobalIndex == 0 || wordFocusUpdateCounter % 5 == 0) {
+            updateAsrBiasing(newFocusGlobalIndex)
+        }
 
         // --- Xóa highlight khỏi từ cũ ---
         if (oldFocusIndex != -1) {
@@ -350,6 +354,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         if (isUserRecording) {
             speechManager.stopListening()
         } else {
+            wordFocusUpdateCounter = 0 // Reset bộ đếm cho phiên ghi âm mới
             resetAllWordStatesAndColors()
             // Focus vào từ đầu tiên, hành động này sẽ kích hoạt updateAsrBiasing
             updateStoryWordFocus(0)
