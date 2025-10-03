@@ -236,7 +236,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     // --- DebtUI Interface Implementation (Refactored) --- //
 
     override fun markWord(index: Int, color: DebtUI.Color) {
-        activity?.runOnUiThread { 
+        activity?.runOnUiThread {
             val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
             val textColor = when (color) {
                 DebtUI.Color.GREEN -> colorCorrectWord
@@ -352,7 +352,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         val oldFocusIndex = currentFocusedWordGlobalIndex
         if (oldFocusIndex == newFocusGlobalIndex) return
 
-        // --- Remove highlight from the old word --- 
+        // --- Remove highlight from the old word ---
         if (oldFocusIndex != -1) {
             allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
                 val state = phase0Manager?.wordStates?.getOrNull(oldFocusIndex)
@@ -367,7 +367,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
         currentFocusedWordGlobalIndex = newFocusGlobalIndex
 
-        // --- Add highlight to the new word --- 
+        // --- Add highlight to the new word ---
         if (newFocusGlobalIndex != -1) {
             allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
                 val state = phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex)
@@ -539,7 +539,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                     }
                 }
             }
-            
+
             if (progressMade && newLockedIndexInWindow != -1) {
                 lastLockedGlobalIndex = startIndex + newLockedIndexInWindow
             }
@@ -586,7 +586,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             }
         }
     }
-    
+
     private fun setupToolbar() {
         (activity as AppCompatActivity).setSupportActionBar(binding.toolbarStoryReading)
         (activity as? AppCompatActivity)?.supportActionBar?.title = currentStoryTitle ?: "Story"

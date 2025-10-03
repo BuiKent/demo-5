@@ -26,13 +26,14 @@ interface FeatureFlagProvider {
 
 /**
  * Một implementation đơn giản, lưu trạng thái các lá cờ trong bộ nhớ.
- * Trạng thái này sẽ mất khi khởi động lại app, trừ khi được cấu hình bởi ABExperimentManager.
+ * Trạng thái mặc định của lá cờ được đọc từ `defaultValue` trong enum.
  */
 class LocalFeatureFlagController : FeatureFlagProvider {
     private val flags = mutableMapOf<String, Boolean>()
 
     override fun isEnabled(flag: FeatureFlag): Boolean {
-        return flags.getOrDefault(flag.key, flag.defaultValue)
+        // Luôn sử dụng giá trị mặc định được định nghĩa trong enum
+        return flag.defaultValue
     }
 
     fun setFlag(flag: FeatureFlag, enabled: Boolean) {
@@ -62,66 +63,5 @@ class LogcatMetricsCollector(private val tag: String = "AppMetrics") : MetricsEm
     override fun emit(metricName: String, params: Map<String, Any>) {
         val formattedParams = params.entries.joinToString(", ") { "${it.key}=${it.value}" }
         Log.d(tag, "Metric: \'$metricName\' | $formattedParams")
-    }
-}
-
-
-// --- 3. A/B Experiment Management ---
-
-/**
- * Định nghĩa các nhóm cho một thử nghiệm A/B.
- */
-enum class ExperimentGroup {
-    CONTROL,    // Nhóm dùng hệ thống cũ (legacy)
-    TREATMENT   // Nhóm dùng hệ thống mới (hybrid)
-}
-
-/**
- * Quản lý việc phân nhóm A/B và cấu hình các feature flag tương ứng.
- */
-class ABExperimentManager(
-    private val sharedPreferences: SharedPreferences,
-    private val featureFlags: LocalFeatureFlagController
-) {
-    private val EXPERIMENT_GROUP_KEY = "ab_experiment_group_v1"
-
-    /**
-     * Phân nhóm cho người dùng (nếu chưa có) và cấu hình app.
-     * Hàm này nên được gọi một lần khi app khởi động hoặc khi bắt đầu một session.
-     */
-    fun setupExperiment() {
-        val group = getAssignedGroup()
-        configureFeatureFlags(group)
-    }
-
-    private fun getAssignedGroup(): ExperimentGroup {
-        val savedGroup = sharedPreferences.getString(EXPERIMENT_GROUP_KEY, null)
-        return when (savedGroup) {
-            ExperimentGroup.CONTROL.name -> ExperimentGroup.CONTROL
-            ExperimentGroup.TREATMENT.name -> ExperimentGroup.TREATMENT
-            else -> {
-                // Người dùng mới, phân nhóm ngẫu nhiên với tỷ lệ 50/50
-                val newGroup = if (Random.nextBoolean()) ExperimentGroup.TREATMENT else ExperimentGroup.CONTROL
-                sharedPreferences.edit().putString(EXPERIMENT_GROUP_KEY, newGroup.name).apply()
-                newGroup
-            }
-        }
-    }
-
-    private fun configureFeatureFlags(group: ExperimentGroup) {
-        featureFlags.resetAll() // Luôn bắt đầu từ trạng thái sạch
-        when (group) {
-            ExperimentGroup.CONTROL -> {
-                // Người dùng trong nhóm CONTROL sẽ dùng hệ thống cũ.
-                featureFlags.setFlag(FeatureFlag.HYBRID_SYSTEM, false)
-            }
-            ExperimentGroup.TREATMENT -> {
-                // Người dùng trong nhóm TREATMENT sẽ dùng hệ thống mới.
-                featureFlags.setFlag(FeatureFlag.HYBRID_SYSTEM, true)
-                // Chúng ta cũng có thể tắt/bật các phần nhỏ hơn của hệ thống mới nếu cần
-                featureFlags.setFlag(FeatureFlag.CHEAP_COLLECTOR, true)
-                featureFlags.setFlag(FeatureFlag.STRICT_CORRECTION, true)
-            }
-        }
     }
 }

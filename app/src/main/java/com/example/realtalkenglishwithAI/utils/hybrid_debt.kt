@@ -63,9 +63,11 @@ class Phase0Manager(
     fun onRecognizedWords(tokens: List<RecognizedToken>) {
         if (tokens.isEmpty()) return
         ui.logMetric("phase0_tokens_in", tokens.size)
+        val fullTranscript = tokens.joinToString(" ") { it.text }
+        ui.logMetric("phase0_full_transcript", fullTranscript)
 
         when (mode) {
-            Mode.Beginner, Mode.Intermediate -> processTranscriptSynchronously(tokens.joinToString(" ") { it.text })
+            Mode.Beginner, Mode.Intermediate -> processTranscriptSynchronously(fullTranscript)
             Mode.Advanced -> {
                 for (tk in tokens) {
                     processTokenForAdvanced(tk)
@@ -76,6 +78,12 @@ class Phase0Manager(
 
     private fun processTranscriptSynchronously(fullTranscript: String) {
         val allTranscribedWords = fullTranscript.split(Regex("\\s+")).map { it }.filter { it.isNotBlank() }
+        
+        // BUG FIX: If the new transcript is shorter, it must be a new utterance. Reset the counter.
+        if (allTranscribedWords.size < processedTranscriptWordCount) {
+            processedTranscriptWordCount = 0
+        }
+
         val newTranscribedWords = allTranscribedWords.drop(processedTranscriptWordCount)
 
         if (newTranscribedWords.isEmpty()) return
