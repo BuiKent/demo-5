@@ -76,7 +76,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     private var fabRedColor: Int = Color.RED
 
     // --- Data Classes for Caching --- //
-    enum class WordMatchStatus { UNREAD, CORRECT, INCORRECT }
+    enum class WordMatchStatus { UNREAD, CORRECT, INCORRECT, SKIPPED }
 
     data class WordInfo(
         val originalText: String,
@@ -244,6 +244,8 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             if (result.newFocusCandidate != currentFocusedWordGlobalIndex) {
                 updateStoryWordFocus(result.newFocusCandidate)
             }
+
+            processSkippedWords() // Amnesty Mechanism
         }
     }
 
@@ -280,6 +282,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
             var newLockedIndexInWindow = -1
             var progressMade = false
+            val dirtySentences = mutableSetOf<Int>()
 
             for ((index, move) in alignmentResult.moves.withIndex()) {
                 val storyWord = alignmentResult.alignedStoryWords.getOrNull(index)
@@ -291,17 +294,17 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                             if (storyWord.status != WordMatchStatus.CORRECT) {
                                 storyWord.status = WordMatchStatus.CORRECT
                                 updateWordSpanNoFlush(storyWord, colorCorrectWord, null)
+                                dirtySentences.add(storyWord.sentenceIndex)
                             }
                             newLockedIndexInWindow = currentWordIndexInWindow
                             progressMade = true
                         }
                         AlignmentMove.SUBSTITUTION, AlignmentMove.DELETION -> {
-                            if (storyWord.status != WordMatchStatus.INCORRECT) {
-                                storyWord.status = WordMatchStatus.INCORRECT
-                                updateWordSpanNoFlush(storyWord, colorIncorrectWord, null)
+                            if (storyWord.status == WordMatchStatus.UNREAD) {
+                                storyWord.status = WordMatchStatus.SKIPPED
                             }
-                             newLockedIndexInWindow = currentWordIndexInWindow
-                             progressMade = true
+                            newLockedIndexInWindow = currentWordIndexInWindow
+                            progressMade = true
                         }
                         AlignmentMove.INSERTION -> { /* Do nothing */ }
                     }
@@ -312,7 +315,6 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                 lastLockedGlobalIndex = startIndex + newLockedIndexInWindow
             }
 
-            val dirtySentences = allWordInfosInStory.map { it.sentenceIndex }.toSet()
             dirtySentences.forEach { sIdx ->
                 if (sIdx >= 0 && sIdx < sentenceTextViews.size)
                     sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
@@ -320,10 +322,34 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
             updateStoryWordFocus((lastLockedGlobalIndex + 1).coerceAtMost(allWordInfosInStory.size - 1))
 
+            processSkippedWords() // Amnesty Mechanism
+
             if (isFinal) {
                 lastPartialTranscript = ""
                 lastProcessedWordsForGreedy = emptyList()
-                realtimeAligner.reset() // THE FIX
+                realtimeAligner.reset()
+            }
+        }
+    }
+
+    private fun processSkippedWords() {
+        val sentencesToUpdate = mutableSetOf<Int>()
+        allWordInfosInStory.forEachIndexed { index, wordInfo ->
+            // Check if a word was skipped and its amnesty period is over
+            if (wordInfo.status == WordMatchStatus.SKIPPED && index < lastLockedGlobalIndex - AMNESTY_DISTANCE) {
+                wordInfo.status = WordMatchStatus.INCORRECT
+                updateWordSpanNoFlush(wordInfo, colorIncorrectWord, null)
+                sentencesToUpdate.add(wordInfo.sentenceIndex)
+            }
+        }
+
+        if (sentencesToUpdate.isNotEmpty()) {
+            activity?.runOnUiThread {
+                sentencesToUpdate.forEach { sIdx ->
+                    if (sIdx >= 0 && sIdx < sentenceTextViews.size) {
+                        sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
+                    }
+                }
             }
         }
     }
@@ -406,7 +432,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             lastLockedGlobalIndex = -1
             lastPartialTranscript = ""
             lastProcessedWordsForGreedy = emptyList()
-            realtimeAligner.reset() // THE FIX
+            realtimeAligner.reset()
             sentenceSpannables.forEachIndexed { index, _ -> sentenceTextViews[index].setText(sentenceSpannables[index], TextView.BufferType.SPANNABLE) }
         }
     }
@@ -486,5 +512,6 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         private const val ALIGNMENT_WINDOW_SIZE = 30
         private const val MIN_RECOGNIZED_WORDS_FOR_ALIGNMENT = 2
         private const val MIN_PARTIAL_PROCESS_INTERVAL_MS = 100L
+        private const val AMNESTY_DISTANCE = 5 // Distance for the Amnesty Mechanism
     }
 }
