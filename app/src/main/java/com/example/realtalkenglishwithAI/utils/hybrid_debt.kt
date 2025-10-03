@@ -39,11 +39,11 @@ class Phase0Manager(
     private var cursorIndex = 0
     private var unreadDebtIndex: Int? = null
     private val correctionBuffers = mutableMapOf<Int, ArrayDeque<RecognizedToken>>()
+    private var lastTranscribedWords: List<String> = emptyList()
 
     // --- Configurable parameters ---
     private val MAX_LOOKAHEAD = 5
     private val MAX_CORRECTION_ATTEMPTS = 2
-    private var processedTranscriptWordCount = 0
     private val thresholds = mapOf(
         Mode.Beginner to 0.60f,
         Mode.Intermediate to 0.70f,
@@ -77,18 +77,46 @@ class Phase0Manager(
     }
 
     private fun processTranscriptSynchronously(fullTranscript: String) {
-        val allTranscribedWords = fullTranscript.split(Regex("\\s+")).map { it }.filter { it.isNotBlank() }
-        
-        // BUG FIX: If the new transcript is shorter, it must be a new utterance. Reset the counter.
-        if (allTranscribedWords.size < processedTranscriptWordCount) {
-            processedTranscriptWordCount = 0
+        val allTranscribedWords = fullTranscript.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+        // If the new transcript is shorter, it's likely a new utterance. Reset history.
+        if (allTranscribedWords.size < lastTranscribedWords.size) {
+            lastTranscribedWords = emptyList()
         }
 
-        val newTranscribedWords = allTranscribedWords.drop(processedTranscriptWordCount)
+        // --- Robust new-transcript extraction (Overlap Detection - Point B) ---
+        var overlap = 0
+        if (lastTranscribedWords.isNotEmpty()) {
+            val maxCheck = min(lastTranscribedWords.size, allTranscribedWords.size)
+            for (k in maxCheck downTo 1) {
+                if (lastTranscribedWords.takeLast(k) == allTranscribedWords.take(k)) {
+                    overlap = k
+                    break
+                }
+            }
+        }
+        
+        val rawNewWords = allTranscribedWords.drop(overlap)
 
-        if (newTranscribedWords.isEmpty()) return
+        // --- Filter Fillers & Dedupe consecutive tokens (Point C) ---
+        val fillers = setOf("uh", "um", "oh", "ah", "mm", "hmm")
+        val newTranscribedWords = mutableListOf<String>()
+        var prev: String? = null
+        for (word in rawNewWords) {
+            val low = word.lowercase()
+            if (low in fillers) continue
+            if (low == prev) continue
+            newTranscribedWords.add(word)
+            prev = low
+        }
 
-        processedTranscriptWordCount = allTranscribedWords.size
+        if (newTranscribedWords.isEmpty()) {
+            lastTranscribedWords = allTranscribedWords // Still update history
+            return
+        }
+
+        // Update history for the next call
+        lastTranscribedWords = allTranscribedWords
         
         var storyIndex = wordStates.indexOfFirst { it == WordState.PENDING || it == WordState.INCORRECT }
         if (storyIndex == -1) return
@@ -162,13 +190,12 @@ class Phase0Manager(
                         }
                     }
                     if (!foundAhead) {
-                        // EXACT WebApp LOGIC: Mark incorrect, advance BOTH cursors.
-                        // The final cursor position will be recalculated at the end.
+                        // --- FIX (Point A): Mark incorrect but DO NOT advance storyIndex ---
                         wordStates[storyIndex] = WordState.INCORRECT
-                        correctionBuffers[storyIndex] = ArrayDeque()
+                        correctionBuffers.getOrPut(storyIndex) { ArrayDeque() }
                         ui.markWord(storyIndex, DebtUI.Color.RED)
-                        storyIndex++
-                        transcriptIndex++
+                        // storyIndex++ // <-- CRITICAL FIX: REMOVED
+                        transcriptIndex++ // Still consume the transcript token that caused the error
                     }
                 }
             }
@@ -304,7 +331,7 @@ class Phase0Manager(
         cursorIndex = 0
         unreadDebtIndex = null
         correctionBuffers.clear()
-        processedTranscriptWordCount = 0 // Reset for sync mode
+        lastTranscribedWords = emptyList()
         collector?.shutdown()
         strictManager?.shutdown()
     }
