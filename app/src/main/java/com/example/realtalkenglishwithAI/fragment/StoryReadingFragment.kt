@@ -9,11 +9,11 @@ import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.SpeechRecognizer
 import android.text.Spannable
 import android.text.SpannableString
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
+import android.text.style.UnderlineSpan
 import android.util.Log
 import android.util.TypedValue
 import android.view.*
@@ -33,11 +33,15 @@ import com.example.realtalkenglishwithAI.R
 import com.example.realtalkenglishwithAI.databinding.FragmentStoryReadingBinding
 import com.example.realtalkenglishwithAI.utils.*
 import org.apache.commons.codec.language.DoubleMetaphone
+import com.example.realtalkenglishwithAI.utils.Mode as DebtMode
 
-class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognitionManagerListener {
+class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognitionManagerListener, DebtUI {
 
     private var _binding: FragmentStoryReadingBinding? = null
     private val binding get() = _binding!!
+
+    // --- Config --- //
+    private val isPhase0Enabled = true // MASTER SWITCH
 
     // --- Speech Recognition --- //
     private lateinit var speechManager: SpeechRecognitionManager
@@ -51,19 +55,20 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     private val sentenceSpannables = mutableListOf<SpannableString>()
     private val allWordInfosInStory = mutableListOf<WordInfo>()
     private val wordStateLock = Any()
+    private var difficultyLevel = 1 // 0: Beginner, 1: Intermediate, 2: Advanced
 
+    // --- Phase 0: Debt-based System --- //
+    private var phase0Manager: Phase0Manager? = null
+
+    // --- Legacy System State --- //
     @Volatile private var lastLockedGlobalIndex: Int = -1
     @Volatile private var currentFocusedWordGlobalIndex: Int = -1
-
-    // --- Hybrid 2.0 Processing --- //
     private lateinit var sequenceAligner: SequenceAligner
     private lateinit var realtimeAligner: RealtimeAlignmentProcessor
-    private lateinit var levenshteinProcessor: LevenshteinProcessor // Keep for other potential uses
     private val deferredAlignmentHandler = Handler(Looper.getMainLooper())
     private var deferredAlignmentRunnable: Runnable? = null
     @Volatile private var lastPartialTranscript: String = ""
     @Volatile private var lastProcessedWordsForGreedy: List<String> = emptyList()
-    private var difficultyLevel = 1 // 0: Beginner, 1: Intermediate, 2: Advanced
     private var lastPartialProcessTime = 0L
 
     // --- Colors --- //
@@ -71,37 +76,29 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     private var colorCorrectWord: Int = Color.GREEN
     private var colorIncorrectWord: Int = Color.RED
     private var colorFocusBackground: Int = Color.YELLOW
-    private var fabWhiteColor: Int = Color.WHITE
-    private var fabBlackColor: Int = Color.BLACK
-    private var fabRedColor: Int = Color.RED
 
-    // --- Data Classes for Caching --- //
+    // --- Data Classes (Restored for compatibility with Legacy System) ---
     enum class WordMatchStatus { UNREAD, CORRECT, INCORRECT, SKIPPED }
 
     data class WordInfo(
         val originalText: String,
         val normalizedText: String,
-        val metaphoneCode: String,
+        val metaphoneCode: String, // RESTORED
         val sentenceIndex: Int,
-        val wordIndexInSentence: Int,
+        val wordIndexInSentence: Int, // RESTORED
         val startCharInSentence: Int,
         val endCharInSentence: Int,
-        var status: WordMatchStatus = WordMatchStatus.UNREAD
+        var status: WordMatchStatus = WordMatchStatus.UNREAD // RESTORED
     )
 
     data class RecognizedInfo(
         val normalized: String,
         val metaphone: String
-    )
+    ) // RESTORED
 
-    private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
-            if (isGranted) {
-                handleRecordAction()
-            } else {
-                Toast.makeText(requireContext(), "Record permission denied.", Toast.LENGTH_SHORT).show()
-            }
-        }
+    private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+        if (isGranted) handleRecordAction() else Toast.makeText(requireContext(), "Record permission denied.", Toast.LENGTH_SHORT).show()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,9 +115,6 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             colorCorrectWord = ContextCompat.getColor(ctx, R.color.blue_500)
             colorIncorrectWord = ContextCompat.getColor(ctx, R.color.red_500)
             colorFocusBackground = ContextCompat.getColor(ctx, R.color.focused_word_background)
-            fabWhiteColor = ContextCompat.getColor(ctx, android.R.color.white)
-            fabBlackColor = ContextCompat.getColor(ctx, android.R.color.black)
-            fabRedColor = ContextCompat.getColor(ctx, R.color.red_500)
         }
     }
 
@@ -136,9 +130,9 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         sharedPreferences = requireActivity().getSharedPreferences("app_settings", Context.MODE_PRIVATE)
         difficultyLevel = sharedPreferences.getInt("DIFFICULTY_LEVEL", 1)
 
-        levenshteinProcessor = LevenshteinProcessor()
+        // Initialize both systems' components
         sequenceAligner = SequenceAligner()
-        realtimeAligner = RealtimeAlignmentProcessor(levenshteinProcessor)
+        realtimeAligner = RealtimeAlignmentProcessor(LevenshteinProcessor())
 
         setupSpeechManager()
         setupToolbar()
@@ -146,212 +140,12 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         displayInitialStoryContent(currentStoryContent!!, binding.linearLayoutResultsContainer)
         setupClickListeners()
         updateFabStates()
-        showBeepWarningIfNeeded()
     }
+
+    // --- Setup Methods --- //
 
     private fun setupSpeechManager() {
         speechManager = SpeechRecognitionManager(requireContext(), this, sharedPreferences)
-    }
-
-    private fun showBeepWarningIfNeeded() {
-        val hasShownWarning = sharedPreferences.getBoolean(PREF_KEY_BEEP_WARNING_SHOWN, false)
-        if (!hasShownWarning && isAdded) {
-            context?.let {
-                AlertDialog.Builder(it)
-                    .setTitle("Audio Notice")
-                    .setMessage("On some devices, a 'beep' sound from the speech recognizer cannot be muted. This is a one-time message.")
-                    .setPositiveButton("OK") { _, _ -> sharedPreferences.edit().putBoolean(PREF_KEY_BEEP_WARNING_SHOWN, true).apply() }
-                    .setCancelable(false)
-                    .show()
-            }
-        }
-    }
-
-    override fun onPartialResults(transcript: String) {
-        activity?.runOnUiThread {
-            lastPartialTranscript = transcript
-            runGreedyAlignment(transcript)
-
-            deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
-            deferredAlignmentRunnable = Runnable { runDeferredAlignment() }
-            deferredAlignmentHandler.postDelayed(deferredAlignmentRunnable!!, DEFERRED_ALIGNMENT_DELAY_MS)
-        }
-    }
-
-    override fun onFinalResults(transcript: String) {
-        activity?.runOnUiThread {
-            lastPartialTranscript = transcript
-            deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
-            runDeferredAlignment(isFinal = true)
-        }
-    }
-
-    override fun onError(error: Int, isCritical: Boolean) {
-        activity?.runOnUiThread {
-            if (isCritical) {
-                val errorMessage = SpeechRecognitionManager.getErrorText(error)
-                Toast.makeText(requireContext(), errorMessage, Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    override fun onStateChanged(state: SpeechRecognitionManager.State) {
-        activity?.runOnUiThread {
-            isUserRecording = state == SpeechRecognitionManager.State.LISTENING
-            updateFabStates()
-        }
-    }
-
-    private fun runGreedyAlignment(partialTranscript: String) {
-        if (!isAdded || !viewLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
-
-        val now = System.currentTimeMillis()
-        if (now - lastPartialProcessTime < MIN_PARTIAL_PROCESS_INTERVAL_MS) {
-            return // Debounce
-        }
-        lastPartialProcessTime = now
-
-        synchronized(wordStateLock) {
-            val result = realtimeAligner.process(
-                partialTranscript = partialTranscript,
-                lastProcessedWords = lastProcessedWordsForGreedy,
-                lastLockedGlobalIndex = lastLockedGlobalIndex,
-                allWordInfosInStory = allWordInfosInStory,
-                difficultyLevel = difficultyLevel,
-                isUserRecording = isUserRecording
-            )
-
-            lastLockedGlobalIndex = result.newLockedGlobalIndex
-            lastProcessedWordsForGreedy = result.newProcessedWords
-
-            result.dirtySentences.forEach { sIdx ->
-                allWordInfosInStory.filter { it.sentenceIndex == sIdx }.forEach { wordInfo ->
-                     val color = when(wordInfo.status) {
-                        WordMatchStatus.CORRECT -> colorCorrectWord
-                        WordMatchStatus.INCORRECT -> colorIncorrectWord
-                        else -> colorDefaultText
-                    }
-                    updateWordSpanNoFlush(wordInfo, color, null)
-                }
-            }
-
-            result.dirtySentences.forEach { sIdx ->
-                if (sIdx >= 0 && sIdx < sentenceTextViews.size) {
-                    sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
-                }
-            }
-
-            if (result.newFocusCandidate != currentFocusedWordGlobalIndex) {
-                updateStoryWordFocus(result.newFocusCandidate)
-            }
-
-            processSkippedWords() // Amnesty Mechanism
-        }
-    }
-
-    private fun runDeferredAlignment(isFinal: Boolean = false) {
-        if (!isAdded || (!isUserRecording && !isFinal)) return
-
-        val recognizedWords = lastPartialTranscript.trim().split(Regex("\\s+"))
-        if (recognizedWords.size < MIN_RECOGNIZED_WORDS_FOR_ALIGNMENT) {
-            if (!isFinal) return
-        }
-
-        synchronized(wordStateLock) {
-            val startIndex = lastLockedGlobalIndex + 1
-            if (startIndex >= allWordInfosInStory.size) return
-
-            val endIndex = (startIndex + ALIGNMENT_WINDOW_SIZE).coerceAtMost(allWordInfosInStory.size)
-            val storyWindow = allWordInfosInStory.subList(startIndex, endIndex)
-
-            val metaphoneEncoder = DoubleMetaphone()
-            val recognizedInfos = recognizedWords.map { word ->
-                val normalized = normalizeToken(word)
-                RecognizedInfo(normalized, metaphoneEncoder.encode(normalized) ?: "")
-            }.filter { it.normalized.isNotBlank() }
-
-            if (recognizedInfos.isEmpty()) return
-
-            val params = getAlignmentParams(difficultyLevel, AlignmentLevel.SENTENCE)
-            val alignmentResult = sequenceAligner.alignWindow(
-                storyWordsWindow = storyWindow, 
-                recognizedWords = recognizedInfos, 
-                difficultyLevel = difficultyLevel,
-                params = params
-            )
-
-            var newLockedIndexInWindow = -1
-            var progressMade = false
-            val dirtySentences = mutableSetOf<Int>()
-
-            for ((index, move) in alignmentResult.moves.withIndex()) {
-                val storyWord = alignmentResult.alignedStoryWords.getOrNull(index)
-                if (storyWord != null) {
-                    val currentWordIndexInWindow = storyWindow.indexOf(storyWord)
-
-                    when (move) {
-                        AlignmentMove.MATCH -> {
-                            if (storyWord.status != WordMatchStatus.CORRECT) {
-                                storyWord.status = WordMatchStatus.CORRECT
-                                updateWordSpanNoFlush(storyWord, colorCorrectWord, null)
-                                dirtySentences.add(storyWord.sentenceIndex)
-                            }
-                            newLockedIndexInWindow = currentWordIndexInWindow
-                            progressMade = true
-                        }
-                        AlignmentMove.SUBSTITUTION, AlignmentMove.DELETION -> {
-                            if (storyWord.status == WordMatchStatus.UNREAD) {
-                                storyWord.status = WordMatchStatus.SKIPPED
-                            }
-                            newLockedIndexInWindow = currentWordIndexInWindow
-                            progressMade = true
-                        }
-                        AlignmentMove.INSERTION -> { /* Do nothing */ }
-                    }
-                }
-            }
-            
-            if (progressMade && newLockedIndexInWindow != -1) {
-                lastLockedGlobalIndex = startIndex + newLockedIndexInWindow
-            }
-
-            dirtySentences.forEach { sIdx ->
-                if (sIdx >= 0 && sIdx < sentenceTextViews.size)
-                    sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
-            }
-
-            updateStoryWordFocus((lastLockedGlobalIndex + 1).coerceAtMost(allWordInfosInStory.size - 1))
-
-            processSkippedWords() // Amnesty Mechanism
-
-            if (isFinal) {
-                lastPartialTranscript = ""
-                lastProcessedWordsForGreedy = emptyList()
-                realtimeAligner.reset()
-            }
-        }
-    }
-
-    private fun processSkippedWords() {
-        val sentencesToUpdate = mutableSetOf<Int>()
-        allWordInfosInStory.forEachIndexed { index, wordInfo ->
-            // Check if a word was skipped and its amnesty period is over
-            if (wordInfo.status == WordMatchStatus.SKIPPED && index < lastLockedGlobalIndex - AMNESTY_DISTANCE) {
-                wordInfo.status = WordMatchStatus.INCORRECT
-                updateWordSpanNoFlush(wordInfo, colorIncorrectWord, null)
-                sentencesToUpdate.add(wordInfo.sentenceIndex)
-            }
-        }
-
-        if (sentencesToUpdate.isNotEmpty()) {
-            activity?.runOnUiThread {
-                sentencesToUpdate.forEach { sIdx ->
-                    if (sIdx >= 0 && sIdx < sentenceTextViews.size) {
-                        sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
-                    }
-                }
-            }
-        }
     }
 
     private fun setupToolbar() {
@@ -375,22 +169,99 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         }, viewLifecycleOwner, Lifecycle.State.RESUMED)
     }
 
-    private fun updateFabStates() {
-        binding.buttonRecordStorySentence.apply {
-            setImageResource(if (isUserRecording) R.drawable.ic_stop else R.drawable.ic_mic)
-            backgroundTintList = ColorStateList.valueOf(if (isUserRecording) fabRedColor else fabWhiteColor)
-            imageTintList = ColorStateList.valueOf(if (isUserRecording) fabWhiteColor else fabBlackColor)
-            isEnabled = speechManager.isAvailable
-            alpha = if (speechManager.isAvailable) 1.0f else 0.5f
+    // --- Speech Recognition Callbacks --- //
+
+    override fun onPartialResults(transcript: String) {
+        if (isPhase0Enabled) {
+            val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
+            phase0Manager?.onRecognizedWords(tokens)
+        } else {
+            activity?.runOnUiThread {
+                lastPartialTranscript = transcript
+                runGreedyAlignment(transcript)
+                deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
+                deferredAlignmentRunnable = Runnable { runDeferredAlignment() }
+                deferredAlignmentHandler.postDelayed(deferredAlignmentRunnable!!, DEFERRED_ALIGNMENT_DELAY_MS)
+            }
         }
     }
+
+    override fun onFinalResults(transcript: String) {
+        if (isPhase0Enabled) {
+            val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
+            phase0Manager?.onRecognizedWords(tokens)
+        } else {
+            activity?.runOnUiThread {
+                lastPartialTranscript = transcript
+                deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
+                runDeferredAlignment(isFinal = true)
+            }
+        }
+    }
+
+    override fun onError(error: Int, isCritical: Boolean) {
+        activity?.runOnUiThread {
+            if (isCritical) Toast.makeText(requireContext(), SpeechRecognitionManager.getErrorText(error), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onStateChanged(state: SpeechRecognitionManager.State) {
+        activity?.runOnUiThread {
+            isUserRecording = state == SpeechRecognitionManager.State.LISTENING
+            updateFabStates()
+        }
+    }
+
+    // --- DebtUI Interface Implementation --- //
+
+    override fun markWord(index: Int, color: DebtUI.Color, locked: Boolean) {
+        val wordInfo = allWordInfosInStory.getOrNull(index) ?: return
+        val textColor = when (color) {
+            DebtUI.Color.GREEN -> colorCorrectWord
+            DebtUI.Color.RED -> colorIncorrectWord
+            else -> colorDefaultText
+        }
+        updateWordSpan(wordInfo, textColor, null, removeAllSpans = true)
+    }
+
+    override fun showDebtMarker(index: Int) {
+        val wordInfo = allWordInfosInStory.getOrNull(index) ?: return
+        val spannable = sentenceSpannables[wordInfo.sentenceIndex]
+        val start = wordInfo.startCharInSentence
+        val end = wordInfo.endCharInSentence
+        if (start < 0 || end > spannable.length) return
+        spannable.setSpan(UnderlineSpan(), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        sentenceTextViews[wordInfo.sentenceIndex].text = spannable
+    }
+
+    override fun hideDebtMarker(index: Int) {
+        val wordInfo = allWordInfosInStory.getOrNull(index) ?: return
+        val spannable = sentenceSpannables[wordInfo.sentenceIndex]
+        val start = wordInfo.startCharInSentence
+        val end = wordInfo.endCharInSentence
+        if (start < 0 || end > spannable.length) return
+
+        spannable.getSpans(start, end, UnderlineSpan::class.java).forEach { spannable.removeSpan(it) }
+        sentenceTextViews[wordInfo.sentenceIndex].text = spannable
+    }
+
+    override fun onAdvanceCursorTo(index: Int) {
+        if (!isPhase0Enabled) return
+        updateStoryWordFocus(index)
+    }
+
+    override fun logMetric(key: String, value: Any) {
+        Log.d(TAG, "Phase0Metric - $key: $value")
+    }
+
+    // --- UI Update and Management --- //
 
     private fun displayInitialStoryContent(storyText: String, container: LinearLayout) {
         container.removeAllViews()
         sentenceTextViews.clear(); sentenceSpannables.clear(); allWordInfosInStory.clear()
         lastLockedGlobalIndex = -1
 
-        val metaphoneEncoder = DoubleMetaphone()
+        val metaphoneEncoder = DoubleMetaphone() // RESTORED
         val sentences = storyText.split(Regex("(?<=[.!?;:])\\s+")).filter { it.isNotBlank() }
 
         sentences.forEachIndexed { sentenceIdx, sentenceStr ->
@@ -411,51 +282,88 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                     val start = sentenceStr.indexOf(word, currentWordStartChar)
                     if (start != -1) {
                         val end = start + word.length
+                        // RESTORED: Add full WordInfo with metaphone
                         allWordInfosInStory.add(WordInfo(word, normalizedWord, metaphoneEncoder.encode(normalizedWord) ?: "", sentenceIdx, wordIdxInSent, start, end))
                         currentWordStartChar = end
                     }
                 }
             }
         }
+
+        if (isPhase0Enabled) {
+            initializePhase0()
+        }
     }
 
     private fun resetAllWordStatesAndColors() {
-        synchronized(wordStateLock) {
-            deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
-            updateStoryWordFocus(-1)
-            allWordInfosInStory.forEach {
-                if (it.status != WordMatchStatus.UNREAD) {
-                    it.status = WordMatchStatus.UNREAD
-                    updateWordSpanNoFlush(it, colorDefaultText, null)
-                }
+        if (isPhase0Enabled) {
+            phase0Manager?.reset()
+            initializePhase0()
+        } else {
+            // Legacy reset logic
+            synchronized(wordStateLock) {
+                deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacks(it) }
+                allWordInfosInStory.forEach { it.status = WordMatchStatus.UNREAD }
+                lastLockedGlobalIndex = -1
+                lastPartialTranscript = ""
+                lastProcessedWordsForGreedy = emptyList()
+                realtimeAligner.reset()
             }
-            lastLockedGlobalIndex = -1
-            lastPartialTranscript = ""
-            lastProcessedWordsForGreedy = emptyList()
-            realtimeAligner.reset()
-            sentenceSpannables.forEachIndexed { index, _ -> sentenceTextViews[index].setText(sentenceSpannables[index], TextView.BufferType.SPANNABLE) }
+        }
+
+        // Common UI reset for both systems
+        synchronized(wordStateLock) {
+            updateStoryWordFocus(-1)
+            allWordInfosInStory.forEachIndexed { _, info -> // FIXED: Renamed 'index' to '_'
+                updateWordSpan(info, colorDefaultText, null, removeAllSpans = true)
+            }
         }
     }
 
     private fun updateStoryWordFocus(newFocusGlobalIndex: Int) {
-        val oldFocusIndex = currentFocusedWordGlobalIndex
-        currentFocusedWordGlobalIndex = newFocusGlobalIndex
+        activity?.runOnUiThread {
+            val oldFocusIndex = currentFocusedWordGlobalIndex
+            if (oldFocusIndex == newFocusGlobalIndex && !isPhase0Enabled) return@runOnUiThread // Allow re-focus in Phase 0
+            currentFocusedWordGlobalIndex = newFocusGlobalIndex
 
-        if (oldFocusIndex != -1 && oldFocusIndex < allWordInfosInStory.size) {
-            val oldWordInfo = allWordInfosInStory[oldFocusIndex]
-            if (oldWordInfo.status != WordMatchStatus.CORRECT) {
-                updateWordSpanNoFlush(oldWordInfo, colorDefaultText, null)?.let { sentenceTextViews[it].setText(sentenceSpannables[it], TextView.BufferType.SPANNABLE) }
+            if (oldFocusIndex != -1) {
+                allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
+                    val isOldWordCorrect = if (isPhase0Enabled) phase0Manager?.wordStates?.getOrNull(oldFocusIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else oldWord.status == WordMatchStatus.CORRECT
+                    if (!isOldWordCorrect) {
+                         updateWordSpan(oldWord, colorDefaultText, null)
+                    }
+                }
             }
-        }
 
-        if (newFocusGlobalIndex != -1 && newFocusGlobalIndex < allWordInfosInStory.size) {
-            val newWordInfo = allWordInfosInStory[newFocusGlobalIndex]
-            if (newWordInfo.status != WordMatchStatus.CORRECT) {
-                updateWordSpanNoFlush(newWordInfo, colorDefaultText, colorFocusBackground)?.let { sentenceTextViews[it].setText(sentenceSpannables[it], TextView.BufferType.SPANNABLE) }
+            if (newFocusGlobalIndex != -1) {
+                allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
+                    val isNewWordCorrect = if (isPhase0Enabled) phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else newWord.status == WordMatchStatus.CORRECT
+                    if (!isNewWordCorrect) {
+                        updateWordSpan(newWord, colorDefaultText, colorFocusBackground)
+                    }
+                }
             }
         }
     }
 
+    private fun updateWordSpan(wordInfo: WordInfo, textColor: Int, newBackgroundColor: Int?, removeAllSpans: Boolean = false) {
+        if (wordInfo.sentenceIndex >= sentenceSpannables.size) return
+        val spannable = sentenceSpannables[wordInfo.sentenceIndex]
+        val start = wordInfo.startCharInSentence
+        val end = wordInfo.endCharInSentence
+        if (start < 0 || end > spannable.length || start >= end) return
+
+        if (removeAllSpans) {
+             spannable.getSpans(start, end, Any::class.java).forEach { spannable.removeSpan(it) }
+        }
+        spannable.getSpans(start, end, BackgroundColorSpan::class.java).forEach { spannable.removeSpan(it) }
+
+        spannable.setSpan(ForegroundColorSpan(textColor), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        newBackgroundColor?.let { spannable.setSpan(BackgroundColorSpan(it), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE) }
+        
+        sentenceTextViews[wordInfo.sentenceIndex].text = spannable
+    }
+    
     private fun updateWordSpanNoFlush(wordInfo: WordInfo, textColor: Int, newBackgroundColor: Int?): Int? {
         if (wordInfo.sentenceIndex >= sentenceSpannables.size) return null
         val spannable = sentenceSpannables[wordInfo.sentenceIndex]
@@ -492,26 +400,192 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         }
     }
 
+     private fun initializePhase0() {
+        if (!isPhase0Enabled) return
+        val storyWords = allWordInfosInStory.map { it.normalizedText }
+        val currentMode = when(difficultyLevel) {
+            0 -> DebtMode.BEGINNER
+            1 -> DebtMode.MEDIUM
+            2 -> DebtMode.ADVANCED
+            else -> DebtMode.MEDIUM
+        }
+        phase0Manager = Phase0Manager(storyWords, this, currentMode).apply {
+            collector = CheapBackgroundCollector(this, currentMode)
+        }
+        Log.d(TAG, "Phase 0 Manager Initialized with ${storyWords.size} words.")
+    }
+
     private fun normalizeToken(s: String): String = s.lowercase().replace(Regex("[^a-z0-9']"), "")
 
     override fun onDestroyView() {
         super.onDestroyView()
-        deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacksAndMessages(null) }
+        if (isPhase0Enabled) {
+            phase0Manager?.reset()
+        } else {
+            deferredAlignmentRunnable?.let { deferredAlignmentHandler.removeCallbacksAndMessages(null) }
+        }
         if (this::speechManager.isInitialized) {
             speechManager.destroy()
         }
         _binding = null
+    }
+    
+    // --- Legacy System (Full Implementation Restored) --- //
+
+    private fun runGreedyAlignment(partialTranscript: String) {
+        if (!isAdded || !viewLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastPartialProcessTime < MIN_PARTIAL_PROCESS_INTERVAL_MS) return
+        lastPartialProcessTime = now
+
+        synchronized(wordStateLock) {
+            val result = realtimeAligner.process(
+                partialTranscript = partialTranscript,
+                lastProcessedWords = lastProcessedWordsForGreedy,
+                lastLockedGlobalIndex = lastLockedGlobalIndex,
+                allWordInfosInStory = allWordInfosInStory,
+                difficultyLevel = difficultyLevel,
+                isUserRecording = isUserRecording
+            )
+            lastLockedGlobalIndex = result.newLockedGlobalIndex
+            lastProcessedWordsForGreedy = result.newProcessedWords
+            result.dirtySentences.forEach { sIdx ->
+                allWordInfosInStory.filter { it.sentenceIndex == sIdx }.forEach { wordInfo ->
+                    val color = when(wordInfo.status) {
+                        WordMatchStatus.CORRECT -> colorCorrectWord
+                        WordMatchStatus.INCORRECT -> colorIncorrectWord
+                        else -> colorDefaultText
+                    }
+                    updateWordSpanNoFlush(wordInfo, color, null)
+                }
+            }
+            result.dirtySentences.forEach { sIdx ->
+                if (sIdx >= 0 && sIdx < sentenceTextViews.size) {
+                    sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
+                }
+            }
+            if (result.newFocusCandidate != currentFocusedWordGlobalIndex) {
+                updateStoryWordFocus(result.newFocusCandidate)
+            }
+            processSkippedWords()
+        }
+    }
+
+    private fun runDeferredAlignment(isFinal: Boolean = false) {
+        if (!isAdded || (!isUserRecording && !isFinal)) return
+        val recognizedWords = lastPartialTranscript.trim().split(Regex("\\s+"))
+        if (recognizedWords.isEmpty()) return
+
+        synchronized(wordStateLock) {
+            val startIndex = lastLockedGlobalIndex + 1
+            if (startIndex >= allWordInfosInStory.size) return
+
+            val endIndex = (startIndex + ALIGNMENT_WINDOW_SIZE).coerceAtMost(allWordInfosInStory.size)
+            val storyWindow = allWordInfosInStory.subList(startIndex, endIndex)
+            val metaphoneEncoder = DoubleMetaphone()
+            val recognizedInfos = recognizedWords.map { word ->
+                val normalized = normalizeToken(word)
+                RecognizedInfo(normalized, metaphoneEncoder.encode(normalized) ?: "")
+            }.filter { it.normalized.isNotBlank() }
+
+            if (recognizedInfos.isEmpty()) return
+
+            val params = getAlignmentParams(difficultyLevel, AlignmentLevel.SENTENCE)
+            val alignmentResult = sequenceAligner.alignWindow(storyWindow, recognizedInfos, difficultyLevel, params)
+
+            var newLockedIndexInWindow = -1
+            var progressMade = false
+            val dirtySentences = mutableSetOf<Int>()
+
+            for ((index, move) in alignmentResult.moves.withIndex()) {
+                val storyWord = alignmentResult.alignedStoryWords.getOrNull(index)
+                if (storyWord != null) {
+                    val currentWordIndexInWindow = storyWindow.indexOf(storyWord)
+                    when (move) {
+                        AlignmentMove.MATCH -> {
+                            if (storyWord.status != WordMatchStatus.CORRECT) {
+                                storyWord.status = WordMatchStatus.CORRECT
+                                updateWordSpanNoFlush(storyWord, colorCorrectWord, null)
+                                dirtySentences.add(storyWord.sentenceIndex)
+                            }
+                            newLockedIndexInWindow = currentWordIndexInWindow
+                            progressMade = true
+                        }
+                        AlignmentMove.SUBSTITUTION, AlignmentMove.DELETION -> {
+                            if (storyWord.status == WordMatchStatus.UNREAD) {
+                                storyWord.status = WordMatchStatus.SKIPPED
+                            }
+                            newLockedIndexInWindow = currentWordIndexInWindow
+                            progressMade = true
+                        }
+                        AlignmentMove.INSERTION -> { /* Do nothing */ }
+                    }
+                }
+            }
+            
+            if (progressMade && newLockedIndexInWindow != -1) {
+                lastLockedGlobalIndex = startIndex + newLockedIndexInWindow
+            }
+            dirtySentences.forEach { sIdx ->
+                if (sIdx >= 0 && sIdx < sentenceTextViews.size) sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
+            }
+            updateStoryWordFocus((lastLockedGlobalIndex + 1).coerceAtMost(allWordInfosInStory.size - 1))
+            processSkippedWords()
+
+            if (isFinal) {
+                lastPartialTranscript = ""
+                lastProcessedWordsForGreedy = emptyList()
+                realtimeAligner.reset()
+            }
+        }
+    }
+
+    private fun getAmnestyDistance(): Int {
+        return when (difficultyLevel) {
+            0 -> 7 // Easy
+            1 -> 5 // Medium
+            2 -> 3 // Hard
+            else -> 5 // Default
+        }
+    }
+
+    private fun processSkippedWords() {
+        val sentencesToUpdate = mutableSetOf<Int>()
+        val amnestyDistance = getAmnestyDistance()
+        allWordInfosInStory.forEachIndexed { index, wordInfo ->
+            if (wordInfo.status == WordMatchStatus.SKIPPED && index < lastLockedGlobalIndex - amnestyDistance) {
+                wordInfo.status = WordMatchStatus.INCORRECT
+                updateWordSpanNoFlush(wordInfo, colorIncorrectWord, null)
+                sentencesToUpdate.add(wordInfo.sentenceIndex)
+            }
+        }
+        if (sentencesToUpdate.isNotEmpty()) {
+            activity?.runOnUiThread {
+                sentencesToUpdate.forEach { sIdx ->
+                    if (sIdx >= 0 && sIdx < sentenceTextViews.size) {
+                        sentenceTextViews[sIdx].setText(sentenceSpannables[sIdx], TextView.BufferType.SPANNABLE)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun updateFabStates() {
+        binding.buttonRecordStorySentence.apply {
+            val tint = if (isUserRecording) Color.WHITE else Color.BLACK
+            setImageResource(if (isUserRecording) R.drawable.ic_stop else R.drawable.ic_mic)
+            backgroundTintList = ColorStateList.valueOf(if (isUserRecording) colorIncorrectWord else Color.WHITE)
+            imageTintList = ColorStateList.valueOf(tint)
+        }
     }
 
     companion object {
         private const val ARG_STORY_CONTENT = "story_content"
         private const val ARG_STORY_TITLE = "story_title"
         private const val TAG = "StoryReadingFragment"
-        private const val PREF_KEY_BEEP_WARNING_SHOWN = "beep_warning_shown"
         private const val DEFERRED_ALIGNMENT_DELAY_MS = 400L
         private const val ALIGNMENT_WINDOW_SIZE = 30
-        private const val MIN_RECOGNIZED_WORDS_FOR_ALIGNMENT = 2
         private const val MIN_PARTIAL_PROCESS_INTERVAL_MS = 100L
-        private const val AMNESTY_DISTANCE = 5 // Distance for the Amnesty Mechanism
     }
 }

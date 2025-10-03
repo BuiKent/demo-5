@@ -2,12 +2,10 @@ package com.example.realtalkenglishwithAI.utils
 
 import android.util.Log
 import com.example.realtalkenglishwithAI.fragment.StoryReadingFragment
-import org.apache.commons.codec.language.DoubleMetaphone
+import com.example.realtalkenglishwithAI.utils.WordMatchingUtils
 import kotlin.math.min
 
 class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinProcessor) {
-
-    private val metaphoneEncoder = DoubleMetaphone()
 
     // --- State for Consecutive Lock ---
     @Volatile private var pendingLockIndex: Int = -1
@@ -61,21 +59,21 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
             val storyWordInfo = allWordInfosInStory[storyIndex]
             val recogWord = currentRecognizedWords[transcriptIndex]
 
-            val isMatch = isWordMatch(storyWordInfo, recogWord, difficultyLevel)
+            val matchScore = WordMatchingUtils.getMatchScore(recogWord, storyWordInfo.normalizedText)
+            val isMatch = isWordMatch(matchScore, difficultyLevel)
 
             if (isMatch) {
+                // --- LOGIC RESTORED --- //
                 if (storyWordInfo.status != StoryReadingFragment.WordMatchStatus.CORRECT) {
                     storyWordInfo.status = StoryReadingFragment.WordMatchStatus.CORRECT
                     dirtySentences.add(storyWordInfo.sentenceIndex)
                 }
 
-                val sim = normalizedSimilarity(storyWordInfo.normalizedText, recogWord)
-
                 if (ENABLE_CONSECUTIVE_DEBUG) {
-                    Log.d("ConsecDebug", "storyIdx=$storyIndex recWord='$recogWord' sim=${String.format("%.2f", sim)} pending=$pendingLockIndex count=$pendingConsecutiveCount")
+                    Log.d("ConsecDebug", "storyIdx=$storyIndex recWord='$recogWord' sim=${String.format("%.2f", matchScore)} pending=$pendingLockIndex count=$pendingConsecutiveCount")
                 }
 
-                if (sim >= params.highConfidenceRatio) {
+                if (matchScore >= params.highConfidenceRatio) {
                     currentLockedGlobalIndex = storyIndex
                     resetPendingLock()
                     if (ENABLE_CONSECUTIVE_DEBUG) Log.d("ConsecDebug", "LOCK at index $storyIndex (High Sim)")
@@ -98,11 +96,8 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
 
                 storyIndex++
                 transcriptIndex++
-
+                // --- END OF RESTORED LOGIC --- //
             } else {
-                // **THE ULTIMATE PATIENCE**
-                // On any mismatch, reset any pending lock and STOP processing this transcript.
-                // Wait for the next partial result to get a better signal.
                 if (pendingLockIndex != -1) {
                     if (ENABLE_CONSECUTIVE_DEBUG) Log.d("ConsecDebug", "RESET pending lock due to mismatch.")
                     resetPendingLock()
@@ -129,41 +124,14 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
         pendingConsecutiveCount = 0
     }
 
-    private fun isWordMatch(storyWordInfo: StoryReadingFragment.WordInfo, recogWord: String, difficulty: Int): Boolean {
-        // Lazily encode the recognized word's metaphone only when needed for medium or easy modes.
-        val recogMetaphone by lazy { metaphoneEncoder.encode(recogWord) }
-
-        return when (difficulty) {
-            DIFF_HARD -> {
-                // Exact match required.
-                storyWordInfo.normalizedText == recogWord
-            }
-            DIFF_MEDIUM -> {
-                val levDistance = levenshteinProcessor.distance(storyWordInfo.normalizedText, recogWord, 2)
-                val textMatch = levDistance <= 1
-                // Fallback to pronunciation match, ensuring metaphone codes are valid before comparing.
-                val phoneticFallbackMatch = storyWordInfo.metaphoneCode.isNotBlank() &&
-                                          storyWordInfo.metaphoneCode == recogMetaphone &&
-                                          levDistance <= 2
-                textMatch || phoneticFallbackMatch
-            }
-            DIFF_EASY -> {
-                // Always forgive common stop words, or accept a matching pronunciation.
-                STOP_WORDS_STRICT.contains(storyWordInfo.normalizedText) ||
-                (storyWordInfo.metaphoneCode.isNotBlank() && storyWordInfo.metaphoneCode == recogMetaphone)
-            }
-            else -> false
+    private fun isWordMatch(score: Float, difficulty: Int): Boolean {
+        val threshold = when (difficulty) {
+            DIFF_EASY -> 0.5f
+            DIFF_MEDIUM -> 0.65f
+            DIFF_HARD -> 0.8f
+            else -> 0.6f
         }
-    }
-
-
-    private fun normalizedSimilarity(a: String, b: String): Float {
-        if (a.isEmpty() && b.isEmpty()) return 1.0f
-        if (a.isEmpty() || b.isEmpty()) return 0f
-        val maxLen = maxOf(a.length, b.length)
-        val dist = levenshteinProcessor.distance(a, b, maxLen) // Use the injected processor
-        val sim = 1.0f - (dist.toFloat() / maxLen.toFloat())
-        return sim.coerceIn(0f, 1f)
+        return score >= threshold
     }
 
     private fun getLockingParams(difficulty: Int): LockingParams {
@@ -181,8 +149,6 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
         private const val DIFF_EASY = 0
         private const val DIFF_MEDIUM = 1
         private const val DIFF_HARD = 2
-        private val STOP_WORDS_STRICT = setOf("a", "an", "the", "to", "of", "in", "on", "at")
-        private const val REALTIME_LOOKAHEAD = 0
         private const val ENABLE_CONSECUTIVE_DEBUG = true
     }
 }
