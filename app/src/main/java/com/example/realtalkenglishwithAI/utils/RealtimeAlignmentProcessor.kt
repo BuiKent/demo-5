@@ -124,9 +124,9 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
 
     private fun isWordMatch(score: Float, difficulty: Int): Boolean {
         val threshold = when (difficulty) {
-            DIFF_EASY -> 0.5f
-            DIFF_MEDIUM -> 0.65f
-            DIFF_HARD -> 0.8f
+            DIFF_BEGINNER -> 0.5f
+            DIFF_INTERMEDIATE -> 0.65f
+            DIFF_ADVANCED -> 0.8f
             else -> 0.6f
         }
         return score >= threshold
@@ -134,9 +134,9 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
 
     private fun getLockingParams(difficulty: Int): LockingParams {
         return when (difficulty) {
-            DIFF_EASY -> LockingParams(highConfidenceRatio = 0.85f, requiredConsecutiveMatches = 2)
-            DIFF_MEDIUM -> LockingParams(highConfidenceRatio = 0.92f, requiredConsecutiveMatches = 3)
-            DIFF_HARD -> LockingParams(highConfidenceRatio = 0.98f, requiredConsecutiveMatches = 2)
+            DIFF_BEGINNER -> LockingParams(highConfidenceRatio = 0.85f, requiredConsecutiveMatches = 2)
+            DIFF_INTERMEDIATE -> LockingParams(highConfidenceRatio = 0.92f, requiredConsecutiveMatches = 3)
+            DIFF_ADVANCED -> LockingParams(highConfidenceRatio = 0.98f, requiredConsecutiveMatches = 2)
             else -> LockingParams(0.90f, 2) // Default case
         }
     }
@@ -144,9 +144,9 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
     private fun normalizeToken(s: String): String = s.lowercase().replace(Regex("[^a-z0-9']"), "")
 
     companion object {
-        private const val DIFF_EASY = 0
-        private const val DIFF_MEDIUM = 1
-        private const val DIFF_HARD = 2
+        private const val DIFF_BEGINNER = 0
+        private const val DIFF_INTERMEDIATE = 1
+        private const val DIFF_ADVANCED = 2
         private const val ENABLE_CONSECUTIVE_DEBUG = true
     }
 }

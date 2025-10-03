@@ -22,15 +22,15 @@ data class AlignmentParams(
 
 fun getAlignmentParams(difficultyLevel: Int, level: AlignmentLevel): AlignmentParams {
     return when (difficultyLevel) {
-        0 -> { // EASY
+        0 -> { // Beginner
             val base = AlignmentParams(maxJumpDistance = 5, highConfidenceRatio = 0.90f, distancePenaltyFactor = 0.08f)
             if (level == AlignmentLevel.WORD) base.copy(maxJumpDistance = (base.maxJumpDistance * 0.6).toInt().coerceAtLeast(1)) else base
         }
-        1 -> { // MEDIUM
+        1 -> { // Intermediate
             val base = AlignmentParams(maxJumpDistance = 3, highConfidenceRatio = 0.95f, distancePenaltyFactor = 0.1f)
             if (level == AlignmentLevel.WORD) base.copy(maxJumpDistance = (base.maxJumpDistance * 0.5).toInt().coerceAtLeast(1)) else base
         }
-        else -> { // HARD
+        else -> { // Advanced
             val base = AlignmentParams(maxJumpDistance = 1, highConfidenceRatio = 0.99f, distancePenaltyFactor = 0.12f)
             if (level == AlignmentLevel.WORD) base.copy(maxJumpDistance = (base.maxJumpDistance * 0.4).toInt().coerceAtLeast(1)) else base
         }
@@ -58,11 +58,11 @@ class SequenceAligner {
         val recogMetaphone = recogWordInfo.metaphone
 
         return when (difficulty) {
-            0 -> { // EASY
+            0 -> { // Beginner
                 val storyMetaphone = storyWordInfo.metaphoneCode
                 storyMetaphone.isNotBlank() && storyMetaphone == recogMetaphone
             }
-            1 -> { // MEDIUM
+            1 -> { // Intermediate
                 val levDistance = levenshteinProcessor.distance(storyWordInfo.normalizedText, recogWordInfo.normalized, 2)
                 val textMatch = levDistance <= 1
                 val phoneticFallbackMatch = storyWordInfo.metaphoneCode.isNotBlank() &&
@@ -70,7 +70,7 @@ class SequenceAligner {
                                           levDistance <= 2
                 textMatch || phoneticFallbackMatch
             }
-            else -> { // HARD
+            else -> { // Advanced
                 storyWordInfo.normalizedText == recogWordInfo.normalized
             }
         }

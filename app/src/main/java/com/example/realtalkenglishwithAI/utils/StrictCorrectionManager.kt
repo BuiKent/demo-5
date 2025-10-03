@@ -46,10 +46,9 @@ class StrictCorrectionManager(
     ) {
         val heavyTask: Future<*> = executor.submit {
             try {
-                var score = 0f
-                val timeMs = measureTimeMillis {
-                    score = strictMatcher(candidateText, targetText)
-                }
+                val startTime = System.currentTimeMillis()
+                val score = strictMatcher(candidateText, targetText)
+                val timeMs = System.currentTimeMillis() - startTime
 
                 // If the task took longer than the timeout, it might have already been cancelled.
                 // This check prevents sending a result after a timeout has already been reported.

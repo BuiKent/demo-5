@@ -157,23 +157,24 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         if (!featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) return
         val storyWords = allWordInfosInStory.map { it.normalizedText }
         val currentMode = when(difficultyLevel) {
-            0 -> DebtMode.BEGINNER
-            1 -> DebtMode.MEDIUM
-            2 -> DebtMode.ADVANCED
-            else -> DebtMode.MEDIUM
+            0 -> DebtMode.Beginner
+            1 -> DebtMode.Intermediate
+            2 -> DebtMode.Advanced
+            else -> DebtMode.Intermediate
         }
-
-        strictManager = StrictCorrectionManager()
 
         phase0Manager = Phase0Manager(storyWords, this, currentMode).apply {
-            if (featureFlags.isEnabled(FeatureFlag.CHEAP_COLLECTOR)) {
-                this.collector = CheapBackgroundCollector(this, currentMode)
-            }
-            if (featureFlags.isEnabled(FeatureFlag.STRICT_CORRECTION)) {
-                this.strictManager = this@StoryReadingFragment.strictManager
+            if (currentMode == DebtMode.Advanced) {
+                if (featureFlags.isEnabled(FeatureFlag.CHEAP_COLLECTOR)) {
+                    this.collector = CheapBackgroundCollector(this, currentMode)
+                }
+                if (featureFlags.isEnabled(FeatureFlag.STRICT_CORRECTION)) {
+                    this@StoryReadingFragment.strictManager = StrictCorrectionManager()
+                    this.strictManager = this@StoryReadingFragment.strictManager
+                }
             }
         }
-        metrics.emit("system_initialized", mapOf("system" to "hybrid", "word_count" to storyWords.size))
+        metrics.emit("system_initialized", mapOf("system" to "hybrid", "word_count" to storyWords.size, "mode" to currentMode.name))
     }
 
     override fun onDestroyView() {
@@ -232,10 +233,10 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         }
     }
 
-    // --- DebtUI Interface Implementation --- //
+    // --- DebtUI Interface Implementation (Refactored) --- //
 
-    override fun markWord(index: Int, color: DebtUI.Color, locked: Boolean) {
-        activity?.runOnUiThread {
+    override fun markWord(index: Int, color: DebtUI.Color) {
+        activity?.runOnUiThread { 
             val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
             val textColor = when (color) {
                 DebtUI.Color.GREEN -> colorCorrectWord
@@ -247,6 +248,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     }
 
     override fun showDebtMarker(index: Int) {
+        // This might be deprecated or used differently in Advanced mode now
         activity?.runOnUiThread {
             val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
             val spannable = sentenceSpannables[wordInfo.sentenceIndex]
@@ -339,7 +341,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             }
         }
         synchronized(wordStateLock) {
-            updateStoryWordFocus(-1)
+            updateStoryWordFocus(-1) // Reset focus
             allWordInfosInStory.forEach { info ->
                 updateWordSpan(info, colorDefaultText, null, removeAllSpans = true)
             }
@@ -348,24 +350,33 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     private fun updateStoryWordFocus(newFocusGlobalIndex: Int) {
         val oldFocusIndex = currentFocusedWordGlobalIndex
-        if (oldFocusIndex == newFocusGlobalIndex && !featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) return
-        currentFocusedWordGlobalIndex = newFocusGlobalIndex
+        if (oldFocusIndex == newFocusGlobalIndex) return
 
+        // --- Remove highlight from the old word --- 
         if (oldFocusIndex != -1) {
             allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
-                val isOldWordCorrect = if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) phase0Manager?.wordStates?.getOrNull(oldFocusIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else oldWord.status == WordMatchStatus.CORRECT
-                if (!isOldWordCorrect) {
-                    updateWordSpan(oldWord, colorDefaultText, null)
+                val state = phase0Manager?.wordStates?.getOrNull(oldFocusIndex)
+                val color = when (state) {
+                    WordState.CORRECT -> colorCorrectWord
+                    WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
+                    else -> colorDefaultText
                 }
+                updateWordSpan(oldWord, color, null) // Remove background, but keep text color
             }
         }
 
+        currentFocusedWordGlobalIndex = newFocusGlobalIndex
+
+        // --- Add highlight to the new word --- 
         if (newFocusGlobalIndex != -1) {
             allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
-                val isNewWordCorrect = if (featureFlags.isEnabled(FeatureFlag.HYBRID_SYSTEM)) phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex) == com.example.realtalkenglishwithAI.utils.WordState.CORRECT else newWord.status == WordMatchStatus.CORRECT
-                if (!isNewWordCorrect) {
-                    updateWordSpan(newWord, colorDefaultText, colorFocusBackground)
+                val state = phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex)
+                val color = when (state) {
+                    WordState.CORRECT -> colorCorrectWord
+                    WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
+                    else -> colorDefaultText
                 }
+                updateWordSpan(newWord, color, colorFocusBackground) // Add background
             }
         }
     }
@@ -548,10 +559,10 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     private fun getAmnestyDistance(): Int {
         return when (difficultyLevel) {
-            0 -> 3 // Easy (Beginner)
-            1 -> 2 // Medium
-            2 -> 1 // Hard (Advanced)
-            else -> 2 // Default
+            0 -> 3 // Beginner
+            1 -> 2 // Intermediate
+            2 -> 1 // Advanced
+            else -> 2
         }
     }
 

@@ -79,7 +79,7 @@ dependencies {
     // Add JNA dependency required by Vosk
     implementation("net.java.dev.jna:jna:5.18.0@aar")
 
-    // Phonetic analysis for Easy mode
+    // Phonetic analysis for Beginner mode
     implementation("commons-codec:commons-codec:1.17.0")
 
     // Testing
