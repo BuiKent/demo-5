@@ -17,15 +17,15 @@ interface DebtUI {
     enum class Color { GREEN, RED, SUBTLE_DEBT, DEFAULT }
 
     fun markWord(index: Int, color: Color, locked: Boolean)
-    fun showDebtMarker(index: Int) 
+    fun showDebtMarker(index: Int)
     fun hideDebtMarker(index: Int)
     fun onAdvanceCursorTo(index: Int)
     fun logMetric(key: String, value: Any)
 }
 
 /**
- * Core logic for Phase 0. Manages word states, handles incoming tokens,
- * and coordinates with the UI and a background collector.
+ * Core logic for the hybrid debt system. Manages word states, handles incoming tokens,
+ * and coordinates with the UI, a cheap background collector, and a strict correction manager.
  */
 class Phase0Manager(
     val storyWords: List<String>,
@@ -37,17 +37,23 @@ class Phase0Manager(
     private var cursorIndex = 0
     private var unreadDebtIndex: Int? = null
     private val correctionBuffers = mutableMapOf<Int, ArrayDeque<RecognizedToken>>()
-    
-    // Configurable parameters
+
+    // --- Configurable parameters ---
     private val MAX_LOOKAHEAD = 5
     private val thresholds = mapOf(
         Mode.BEGINNER to 0.60f,
         Mode.MEDIUM to 0.70f,
         Mode.ADVANCED to 0.82f
     )
+    private val strictThresholds = mapOf(
+        Mode.BEGINNER to 0.75f,
+        Mode.MEDIUM to 0.85f,
+        Mode.ADVANCED to 0.92f
+    )
 
-    // The collector is set after initialization to break the circular dependency.
+    // --- Child Workers --- 
     var collector: CheapBackgroundCollector? = null
+    var strictManager: StrictCorrectionManager? = null
 
     @Synchronized
     fun onRecognizedWords(tokens: List<RecognizedToken>) {
@@ -69,76 +75,71 @@ class Phase0Manager(
             if (isFastMatch(token.text, target)) {
                 markCorrect(cursorIndex)
             } else {
-                // Create a new debt, but don't stop.
+                // Create a new debt
+                wordStates[cursorIndex] = WordState.UNRESOLVED_DEBT
                 unreadDebtIndex = cursorIndex
                 correctionBuffers[cursorIndex] = ArrayDeque()
                 ui.showDebtMarker(cursorIndex)
                 ui.logMetric("debt_created", cursorIndex)
 
-                // Try to match this token to the words immediately following the new debt.
                 tryMatchToFollowing(token)
                 appendToCorrectionBuffer(cursorIndex, token)
             }
         } else {
-            // A debt is currently pending at 'debtIndex'
+            // A debt is currently pending
             appendToCorrectionBuffer(debtIndex, token)
             collector?.onDebtBufferUpdated(debtIndex, correctionBuffers[debtIndex]!!.toList())
-            
-            // While waiting for the debt to be resolved, still try to match new tokens to upcoming words.
+
             tryMatchToFollowing(token)
-            
-            // If we've heard too many words after the debt, give up on it.
+
             if (correctionBuffers[debtIndex]!!.size >= MAX_LOOKAHEAD) {
                 finalizeDebtAsIncorrect(debtIndex)
             }
         }
     }
 
-    private fun tryMatchToFollowing(token: RecognizedToken) {
-        val limit = min(n - 1, cursorIndex + MAX_LOOKAHEAD)
-        // Start looking from the word *after* the current cursor position
-        for (idx in (cursorIndex + 1)..limit) {
-            if (wordStates[idx] == WordState.PENDING) {
-                if (isFastMatch(token.text, storyWords[idx])) {
-                    markCorrect(idx)
-                    // If we colored a word, we can stop trying to use this token.
-                    // This prevents one spoken word from coloring multiple story words.
-                    break 
-                }
-            }
-        }
-        advanceCursorPastLocked()
-    }
+    @Synchronized
+    fun requestStrictReeval(debtIndex: Int, candidateToken: RecognizedToken) {
+        if (wordStates.getOrNull(debtIndex) != WordState.UNRESOLVED_DEBT) return
 
-    private fun appendToCorrectionBuffer(debtIndex: Int, token: RecognizedToken) {
-        val buf = correctionBuffers.getOrPut(debtIndex) { ArrayDeque() }
-        if (buf.size >= MAX_LOOKAHEAD) buf.removeFirst()
-        buf.addLast(token)
+        val strictMatcher = { a: String, b: String -> WordMatchingUtils.getMatchScore(a, b) }
+        val threshold = strictThresholds[mode]!!
+
+        strictManager?.submitStrictCheck(debtIndex, candidateToken.text, storyWords[debtIndex], strictMatcher, threshold) { result ->
+            // This callback runs on a background thread. 
+            // We need to re-synchronize with the Phase0Manager to modify its state.
+            handleStrictResult(result)
+        }
     }
 
     @Synchronized
-    fun requestStrictReeval(debtIndex: Int, candidateToken: RecognizedToken) {
-        if (wordStates[debtIndex] != WordState.PENDING && wordStates[debtIndex] != WordState.UNRESOLVED_DEBT) return
+    private fun handleStrictResult(result: StrictResult) {
+        ui.logMetric("strict_result", "index=${result.debtIndex}, verdict=${result.verdict}, time=${result.timeMs}ms")
+        
+        // Ensure the state hasn't changed while the strict check was running
+        if (wordStates.getOrNull(result.debtIndex) != WordState.UNRESOLVED_DEBT) return
 
-        if (isStrictMatch(candidateToken.text, storyWords[debtIndex])) {
-            markCorrect(debtIndex)
-            ui.hideDebtMarker(debtIndex)
-            ui.logMetric("debt_resolved_by_collector", debtIndex)
-            // Clear the buffer for the resolved debt
-            correctionBuffers.remove(debtIndex)
-            // If this was the active debt, clear it.
-            if (unreadDebtIndex == debtIndex) unreadDebtIndex = null
-            
-            // Crucially, advance the cursor past any newly resolved words.
-            advanceCursorPastLocked()
-        } else {
-            ui.logMetric("collector_strict_failed", debtIndex)
+        when (result.verdict) {
+            Verdict.GREEN -> {
+                markCorrect(result.debtIndex)
+                correctionBuffers.remove(result.debtIndex)
+                if (unreadDebtIndex == result.debtIndex) unreadDebtIndex = null
+                advanceCursorPastLocked()
+            }
+            Verdict.RED -> {
+                finalizeDebtAsIncorrect(result.debtIndex)
+            }
+            Verdict.UNKNOWN -> {
+                // The check was inconclusive or timed out. For now, we do nothing and wait
+                // for more tokens or for the debt to expire naturally.
+                ui.logMetric("strict_unknown", result.debtIndex)
+            }
         }
     }
 
     @Synchronized
     fun finalizeDebtAsIncorrect(debtIndex: Int) {
-        if (wordStates[debtIndex] == WordState.PENDING || wordStates[debtIndex] == WordState.UNRESOLVED_DEBT) {
+        if (wordStates.getOrNull(debtIndex) == WordState.UNRESOLVED_DEBT) {
             wordStates[debtIndex] = WordState.INCORRECT
             ui.markWord(debtIndex, DebtUI.Color.RED, locked = true)
             ui.hideDebtMarker(debtIndex)
@@ -151,15 +152,35 @@ class Phase0Manager(
     }
 
     private fun markCorrect(index: Int) {
+        if (wordStates.getOrNull(index) == WordState.CORRECT) return
         wordStates[index] = WordState.CORRECT
         ui.markWord(index, DebtUI.Color.GREEN, locked = true)
-        ui.hideDebtMarker(index) // Hide marker in case it was a debt
+        ui.hideDebtMarker(index) 
         ui.logMetric("mark_correct", index)
 
         if (unreadDebtIndex == index) unreadDebtIndex = null
         if (index == cursorIndex) {
             advanceCursorPastLocked()
         }
+    }
+
+    private fun tryMatchToFollowing(token: RecognizedToken) {
+        val limit = min(n - 1, cursorIndex + MAX_LOOKAHEAD)
+        for (idx in (cursorIndex + 1)..limit) {
+            if (wordStates[idx] == WordState.PENDING) {
+                if (isFastMatch(token.text, storyWords[idx])) {
+                    markCorrect(idx)
+                    break
+                }
+            }
+        }
+        advanceCursorPastLocked()
+    }
+
+    private fun appendToCorrectionBuffer(debtIndex: Int, token: RecognizedToken) {
+        val buf = correctionBuffers.getOrPut(debtIndex) { ArrayDeque() }
+        if (buf.size >= MAX_LOOKAHEAD) buf.removeFirst()
+        buf.addLast(token)
     }
 
     private fun advanceCursorPastLocked() {
@@ -174,13 +195,6 @@ class Phase0Manager(
         return score >= thresholds[mode]!!
     }
 
-    private fun isStrictMatch(a: String, b: String): Boolean {
-        // For strict matching, we might use a higher threshold or a different algorithm.
-        // For now, we use the same as fast match but this can be evolved.
-        val score = WordMatchingUtils.getMatchScore(a, b)
-        return score >= (thresholds[mode]!! + 0.1f).coerceAtMost(1.0f) // e.g., slightly stricter
-    }
-
     @Synchronized
     fun reset() {
         wordStates.fill(WordState.PENDING)
@@ -188,6 +202,7 @@ class Phase0Manager(
         unreadDebtIndex = null
         correctionBuffers.clear()
         collector?.shutdown()
+        strictManager?.shutdown()
     }
 }
 
@@ -207,13 +222,11 @@ class CheapBackgroundCollector(
         executor.execute {
             try {
                 val target = manager.storyWords.getOrNull(debtIndex) ?: return@execute
-                // Look for a promising candidate in the buffer
-                for (tk in bufferSnapshot.asReversed()) { // Check most recent first
+                for (tk in bufferSnapshot.asReversed()) { 
                     val quickScore = WordMatchingUtils.getMatchScore(tk.text, target)
                     if (quickScore >= quickThreshold && tk.confidence >= 0.2f) {
-                        // Candidate found -> suggest strict re-evaluation to the manager
                         manager.requestStrictReeval(debtIndex, tk)
-                        return@execute // Stop after finding one candidate
+                        return@execute
                     }
                 }
             } catch (t: Throwable) {

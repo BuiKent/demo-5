@@ -63,7 +63,6 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
             val isMatch = isWordMatch(matchScore, difficultyLevel)
 
             if (isMatch) {
-                // --- LOGIC RESTORED --- //
                 if (storyWordInfo.status != StoryReadingFragment.WordMatchStatus.CORRECT) {
                     storyWordInfo.status = StoryReadingFragment.WordMatchStatus.CORRECT
                     dirtySentences.add(storyWordInfo.sentenceIndex)
@@ -96,13 +95,12 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
 
                 storyIndex++
                 transcriptIndex++
-                // --- END OF RESTORED LOGIC --- //
             } else {
                 if (pendingLockIndex != -1) {
                     if (ENABLE_CONSECUTIVE_DEBUG) Log.d("ConsecDebug", "RESET pending lock due to mismatch.")
                     resetPendingLock()
                 }
-                break // Stop immediately and wait for the next onPartialResults call
+                break
             }
         }
 
