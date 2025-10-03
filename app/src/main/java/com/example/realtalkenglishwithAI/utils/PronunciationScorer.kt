@@ -149,7 +149,7 @@ object PronunciationScorer {
                 finalConfidence = null
                 if (recognizedTextNormalized.isBlank() && targetNormalized.isNotEmpty()) finalScore = 0
             }
-            val alignmentSource = finalRecognizedSegment ?: ""
+            val alignmentSource = finalRecognizedSegment
             try {
                 val (alignedTargetChars, _, ops) = alignStrings(targetNormalized, alignmentSource)
                 val oldSpans = spannable.getSpans(0, spannable.length, Any::class.java); oldSpans.forEach { spannable.removeSpan(it) }

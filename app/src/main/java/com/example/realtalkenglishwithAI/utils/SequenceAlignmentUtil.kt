@@ -2,6 +2,7 @@ package com.example.realtalkenglishwithAI.utils
 
 import android.util.Log
 import com.example.realtalkenglishwithAI.fragment.StoryReadingFragment
+import org.apache.commons.codec.language.DoubleMetaphone
 import kotlin.math.abs
 
 // --- Top-level constants for scoring ---
@@ -51,10 +52,33 @@ data class AlignmentResult(
 
 class SequenceAligner {
 
+    private val levenshteinProcessor = LevenshteinProcessor() // Internal instance
+
+    private fun isWordMatch(storyWordInfo: StoryReadingFragment.WordInfo, recogWordInfo: StoryReadingFragment.RecognizedInfo, difficulty: Int): Boolean {
+        val recogMetaphone = recogWordInfo.metaphone
+
+        return when (difficulty) {
+            0 -> { // EASY
+                val storyMetaphone = storyWordInfo.metaphoneCode
+                storyMetaphone.isNotBlank() && storyMetaphone == recogMetaphone
+            }
+            1 -> { // MEDIUM
+                val levDistance = levenshteinProcessor.distance(storyWordInfo.normalizedText, recogWordInfo.normalized, 2)
+                val textMatch = levDistance <= 1
+                val phoneticFallbackMatch = storyWordInfo.metaphoneCode.isNotBlank() &&
+                                          storyWordInfo.metaphoneCode == recogMetaphone &&
+                                          levDistance <= 2
+                textMatch || phoneticFallbackMatch
+            }
+            else -> { // HARD
+                storyWordInfo.normalizedText == recogWordInfo.normalized
+            }
+        }
+    }
+
     fun alignWindow(
         storyWordsWindow: List<StoryReadingFragment.WordInfo>,
         recognizedWords: List<StoryReadingFragment.RecognizedInfo>,
-        levenshteinProcessor: LevenshteinProcessor,
         difficultyLevel: Int,
         params: AlignmentParams
     ): AlignmentResult {
@@ -79,11 +103,7 @@ class SequenceAligner {
 
                 val distanceFromExpected = i - 1 // How far into the window this story word is
                 
-                val isMatch = when (difficultyLevel) {
-                    0 -> levenshteinProcessor.distance(storyWord.normalizedText, recognizedWord.normalized, 2) <= 2
-                    1 -> levenshteinProcessor.distance(storyWord.normalizedText, recognizedWord.normalized, 1) <= 1
-                    else -> storyWord.normalizedText == recognizedWord.normalized
-                }
+                val isMatch = isWordMatch(storyWord, recognizedWord, difficultyLevel)
 
                 var substitutionScore = if(isMatch) ALIGNMENT_BASE_MATCH_SCORE.toFloat() else ALIGNMENT_MISMATCH_PENALTY.toFloat()
 

@@ -2,9 +2,12 @@ package com.example.realtalkenglishwithAI.utils
 
 import android.util.Log
 import com.example.realtalkenglishwithAI.fragment.StoryReadingFragment
+import org.apache.commons.codec.language.DoubleMetaphone
 import kotlin.math.min
 
 class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinProcessor) {
+
+    private val metaphoneEncoder = DoubleMetaphone()
 
     // --- State for Consecutive Lock ---
     @Volatile private var pendingLockIndex: Int = -1
@@ -56,10 +59,9 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
 
         while (storyIndex < allWordInfosInStory.size && transcriptIndex < currentRecognizedWords.size) {
             val storyWordInfo = allWordInfosInStory[storyIndex]
-            val storyWordNormalized = storyWordInfo.normalizedText
             val recogWord = currentRecognizedWords[transcriptIndex]
 
-            val isMatch = isWordMatch(storyWordNormalized, recogWord, difficultyLevel)
+            val isMatch = isWordMatch(storyWordInfo, recogWord, difficultyLevel)
 
             if (isMatch) {
                 if (storyWordInfo.status != StoryReadingFragment.WordMatchStatus.CORRECT) {
@@ -67,7 +69,7 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
                     dirtySentences.add(storyWordInfo.sentenceIndex)
                 }
 
-                val sim = normalizedSimilarity(storyWordNormalized, recogWord)
+                val sim = normalizedSimilarity(storyWordInfo.normalizedText, recogWord)
 
                 if (ENABLE_CONSECUTIVE_DEBUG) {
                     Log.d("ConsecDebug", "storyIdx=$storyIndex recWord='$recogWord' sim=${String.format("%.2f", sim)} pending=$pendingLockIndex count=$pendingConsecutiveCount")
@@ -98,45 +100,14 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
                 transcriptIndex++
 
             } else {
+                // **THE ULTIMATE PATIENCE**
+                // On any mismatch, reset any pending lock and STOP processing this transcript.
+                // Wait for the next partial result to get a better signal.
                 if (pendingLockIndex != -1) {
                     if (ENABLE_CONSECUTIVE_DEBUG) Log.d("ConsecDebug", "RESET pending lock due to mismatch.")
                     resetPendingLock()
                 }
-
-                var foundAhead = false
-                val lookaheadEnd = min(allWordInfosInStory.size, storyIndex + 1 + REALTIME_LOOKAHEAD)
-
-                for (lookIdx in (storyIndex + 1) until lookaheadEnd) {
-                    val aheadWordInfo = allWordInfosInStory[lookIdx]
-                    if (isWordMatch(aheadWordInfo.normalizedText, recogWord, difficultyLevel)) {
-                        // In Easy mode, do not penalize for skipping words
-                        if (difficultyLevel != DIFF_EASY) {
-                            for (k in storyIndex until lookIdx) {
-                                val skippedWordInfo = allWordInfosInStory[k]
-                                if (skippedWordInfo.status != StoryReadingFragment.WordMatchStatus.CORRECT) {
-                                    skippedWordInfo.status = StoryReadingFragment.WordMatchStatus.INCORRECT
-                                    dirtySentences.add(skippedWordInfo.sentenceIndex)
-                                }
-                            }
-                        }
-
-                        if (aheadWordInfo.status != StoryReadingFragment.WordMatchStatus.CORRECT) {
-                            aheadWordInfo.status = StoryReadingFragment.WordMatchStatus.CORRECT
-                            dirtySentences.add(aheadWordInfo.sentenceIndex)
-                        }
-                        currentLockedGlobalIndex = lookIdx // Lock immediately on lookahead
-                        resetPendingLock()
-                        
-                        storyIndex = lookIdx + 1
-                        transcriptIndex++
-                        foundAhead = true
-                        break
-                    }
-                }
-
-                if (!foundAhead) {
-                    transcriptIndex++
-                }
+                break // Stop immediately and wait for the next onPartialResults call
             }
         }
 
@@ -158,18 +129,33 @@ class RealtimeAlignmentProcessor(private val levenshteinProcessor: LevenshteinPr
         pendingConsecutiveCount = 0
     }
 
-    private fun isWordMatch(storyWord: String, recogWord: String, difficulty: Int): Boolean {
-        // The logic for stop words is now integrated here for simplicity
+    private fun isWordMatch(storyWordInfo: StoryReadingFragment.WordInfo, recogWord: String, difficulty: Int): Boolean {
+        // Lazily encode the recognized word's metaphone only when needed for medium or easy modes.
+        val recogMetaphone by lazy { metaphoneEncoder.encode(recogWord) }
+
         return when (difficulty) {
-            DIFF_HARD -> storyWord == recogWord
-            DIFF_MEDIUM -> levenshteinProcessor.distance(storyWord, recogWord, 1) <= 1
+            DIFF_HARD -> {
+                // Exact match required.
+                storyWordInfo.normalizedText == recogWord
+            }
+            DIFF_MEDIUM -> {
+                val levDistance = levenshteinProcessor.distance(storyWordInfo.normalizedText, recogWord, 2)
+                val textMatch = levDistance <= 1
+                // Fallback to pronunciation match, ensuring metaphone codes are valid before comparing.
+                val phoneticFallbackMatch = storyWordInfo.metaphoneCode.isNotBlank() &&
+                                          storyWordInfo.metaphoneCode == recogMetaphone &&
+                                          levDistance <= 2
+                textMatch || phoneticFallbackMatch
+            }
             DIFF_EASY -> {
-                if (STOP_WORDS_STRICT.contains(storyWord)) true
-                else levenshteinProcessor.distance(storyWord, recogWord, 2) <= 2
+                // Always forgive common stop words, or accept a matching pronunciation.
+                STOP_WORDS_STRICT.contains(storyWordInfo.normalizedText) ||
+                (storyWordInfo.metaphoneCode.isNotBlank() && storyWordInfo.metaphoneCode == recogMetaphone)
             }
             else -> false
         }
     }
+
 
     private fun normalizedSimilarity(a: String, b: String): Float {
         if (a.isEmpty() && b.isEmpty()) return 1.0f

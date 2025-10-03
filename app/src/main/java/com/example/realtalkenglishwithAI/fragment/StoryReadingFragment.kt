@@ -58,7 +58,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     // --- Hybrid 2.0 Processing --- //
     private lateinit var sequenceAligner: SequenceAligner
     private lateinit var realtimeAligner: RealtimeAlignmentProcessor
-    private lateinit var levenshteinProcessor: LevenshteinProcessor // New
+    private lateinit var levenshteinProcessor: LevenshteinProcessor // Keep for other potential uses
     private val deferredAlignmentHandler = Handler(Looper.getMainLooper())
     private var deferredAlignmentRunnable: Runnable? = null
     @Volatile private var lastPartialTranscript: String = ""
@@ -274,7 +274,6 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             val alignmentResult = sequenceAligner.alignWindow(
                 storyWordsWindow = storyWindow, 
                 recognizedWords = recognizedInfos, 
-                levenshteinProcessor = levenshteinProcessor,
                 difficultyLevel = difficultyLevel,
                 params = params
             )
