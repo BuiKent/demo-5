@@ -55,11 +55,14 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     @Volatile private var currentFocusedWordGlobalIndex: Int = -1
     private var difficultyLevel = 1 // 0: Beginner, 1: Intermediate, 2: Advanced
 
-    // --- UI Colors ---
+    // --- UI Colors & ASR Biasing Constants ---
     private var colorDefaultText: Int = Color.BLACK
     private var colorCorrectWord: Int = Color.GREEN
     private var colorIncorrectWord: Int = Color.RED
     private var colorFocusBackground: Int = Color.YELLOW
+    private val BIAS_WINDOW_SIZE = 50
+    private val BIAS_WINDOW_LOOK_BACK = 10
+    private val BIAS_WINDOW_LOOK_FORWARD = BIAS_WINDOW_SIZE - BIAS_WINDOW_LOOK_BACK
 
     // --- Data Class for UI positioning ---
     data class WordInfo(
@@ -117,7 +120,6 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     }
 
     // --- Setup & Lifecycle Methods --- //
-
     private fun setupSpeechManager() {
         speechManager = SpeechRecognitionManager(requireContext(), this, sharedPreferences)
     }
@@ -186,7 +188,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     // --- DebtUI Interface Implementation --- //
 
     override fun markWord(index: Int, color: DebtUI.Color) {
-        activity?.runOnUiThread { 
+        activity?.runOnUiThread {
             val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
             val textColor = when (color) {
                 DebtUI.Color.GREEN -> colorCorrectWord
@@ -279,7 +281,10 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         val oldFocusIndex = currentFocusedWordGlobalIndex
         if (oldFocusIndex == newFocusGlobalIndex) return
 
-        // --- Remove highlight from the old word --- 
+        // Gọi hàm "mớm lời" ngay khi con trỏ thay đổi.
+        updateAsrBiasing(newFocusGlobalIndex)
+
+        // --- Xóa highlight khỏi từ cũ ---
         if (oldFocusIndex != -1) {
             allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
                 val state = phase0Manager?.wordStates?.getOrNull(oldFocusIndex)
@@ -288,13 +293,14 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                     WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
                     else -> colorDefaultText
                 }
-                updateWordSpan(oldWord, color, null) // Remove background, but keep text color
+                updateWordSpan(oldWord, color, null) // Bỏ background, giữ màu chữ
             }
         }
 
+        // Cập nhật con trỏ
         currentFocusedWordGlobalIndex = newFocusGlobalIndex
 
-        // --- Add highlight to the new word --- 
+        // --- Thêm highlight cho từ mới ---
         if (newFocusGlobalIndex != -1) {
             allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
                 val state = phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex)
@@ -303,7 +309,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                     WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
                     else -> colorDefaultText
                 }
-                updateWordSpan(newWord, color, colorFocusBackground) // Add background
+                updateWordSpan(newWord, color, colorFocusBackground) // Thêm background
             }
         }
     }
@@ -345,6 +351,8 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             speechManager.stopListening()
         } else {
             resetAllWordStatesAndColors()
+            // Focus vào từ đầu tiên, hành động này sẽ kích hoạt updateAsrBiasing
+            updateStoryWordFocus(0)
             speechManager.startListening()
         }
     }
@@ -359,7 +367,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             imageTintList = ColorStateList.valueOf(tint)
         }
     }
-    
+
     private fun setupToolbar() {
         (activity as AppCompatActivity).setSupportActionBar(binding.toolbarStoryReading)
         (activity as? AppCompatActivity)?.supportActionBar?.title = currentStoryTitle ?: "Story"
@@ -379,6 +387,26 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                 return false
             }
         }, viewLifecycleOwner, Lifecycle.State.RESUMED)
+    }
+
+    // --- ASR Biasing Logic ---
+    private fun updateAsrBiasing(newFocusIndex: Int) {
+        if (!this::speechManager.isInitialized) return
+
+        if (newFocusIndex < 0) {
+            // Nếu không có từ nào được focus, xóa danh sách "mớm lời"
+            speechManager.updateBiasingStrings(emptyList())
+            return
+        }
+
+        val start = (newFocusIndex - BIAS_WINDOW_LOOK_BACK).coerceAtLeast(0)
+        val end = (newFocusIndex + BIAS_WINDOW_LOOK_FORWARD).coerceAtMost(allWordInfosInStory.size)
+
+        val biasList = allWordInfosInStory.subList(start, end)
+            .map { it.normalizedText }
+            .distinct()
+
+        speechManager.updateBiasingStrings(biasList)
     }
 
     companion object {
