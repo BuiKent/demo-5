@@ -1,9 +1,9 @@
 package com.example.realtalkenglishwithAI.utils
 
+import kotlinx.coroutines.*
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import kotlin.math.min
 
 // --- Centralized Enums and Models for the new architecture ---
@@ -14,7 +14,7 @@ enum class WordState { PENDING, CORRECT, INCORRECT, SKIPPED, UNRESOLVED_DEBT }
 
 data class RecognizedToken(val text: String, val confidence: Float = 1.0f)
 
-// --- UI Updater Interface: To be implemented by the Fragment --- 
+// --- UI Updater Interface: To be implemented by the Fragment ---
 interface DebtUI {
     enum class Color { GREEN, RED, DEFAULT }
 
@@ -31,22 +31,21 @@ class SpeechAligner(
     private val mode: Mode = Mode.Intermediate
 ) {
     private val n = storyWords.size
-    // Point A: Normalized story words for consistent matching
     private val storyWordsNorm: List<String> = storyWords.map { it.lowercase().replace(Regex("[\\p{P}\\p{S}]"), "") }
     val wordStates = MutableList(n) { WordState.PENDING }
     private var cursorIndex = 0
     private var unreadDebtIndex: Int? = null
     private val correctionBuffers = mutableMapOf<Int, ArrayDeque<RecognizedToken>>()
-    private var lastTranscribedWords: List<String> = emptyList()
+    private var lastTranscribedTokens: List<RecognizedToken> = emptyList()
 
     // --- Configurable parameters ---
     private val MAX_LOOKAHEAD = 3
     private val MAX_CORRECTION_ATTEMPTS = 2
     private val LOOKAHEAD_MIN_SCORE = 0.75f
     private val LOOKAHEAD_MARGIN = 0.20f
-    private val MIN_TOKEN_CONFIDENCE = 0.25f // Point C
-    private var lastLookaheadAt = 0L // Point F
-    private val LOOKAHEAD_COOLDOWN_MS = 300L // Point F
+    private val MIN_TOKEN_CONFIDENCE = 0.25f
+    private var lastLookaheadAt = 0L
+    private val LOOKAHEAD_COOLDOWN_MS = 300L
 
     private val thresholds = mapOf(
         Mode.Beginner to 0.70f,
@@ -58,6 +57,19 @@ class SpeechAligner(
         Mode.Intermediate to 0.85f,
         Mode.Advanced to 0.92f
     )
+    private val CONFIDENCE_THRESHOLDS_FOR_INCORRECT = mapOf(
+        Mode.Beginner to 0.55f,
+        Mode.Intermediate to 0.65f,
+        Mode.Advanced to 0.75f
+    )
+
+    // --- Grace Buffer: For handling noisy environments ---
+    private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var lowConfidenceStreak = 0
+    private var lastLowConfidenceAt = 0L
+    private val GRACE_BUFFER_WINDOW_MS = 2000L  // 2-second UI pause
+    private val MAX_LOW_CONFIDENCE_STREAK = 3   // Trigger pause after 3 consecutive noise tokens
+    @Volatile private var isGracePaused = false
 
     var collector: CheapBackgroundCollector? = null
     var strictManager: StrictCorrectionManager? = null
@@ -65,16 +77,12 @@ class SpeechAligner(
     @Synchronized
     fun onRecognizedWords(tokens: List<RecognizedToken>) {
         if (tokens.isEmpty()) return
-        ui.logMetric("tokens_in", tokens.size)
+        ui.logMetric("tokens_in", tokens.size.toString()) // NEW: Consistent logging to String
 
-        // Point C: Filter tokens by confidence
         val filteredTokens = tokens.filter { it.confidence >= MIN_TOKEN_CONFIDENCE }
-        val allTranscribedWords = filteredTokens.map { it.text.trim().lowercase() }.filter { it.isNotBlank() }
-        val fullTranscript = allTranscribedWords.joinToString(" ")
-        ui.logMetric("full_transcript", fullTranscript)
 
         when (mode) {
-            Mode.Beginner, Mode.Intermediate -> processTranscriptSynchronously(allTranscribedWords)
+            Mode.Beginner, Mode.Intermediate -> processTranscriptSynchronously(filteredTokens)
             Mode.Advanced -> {
                 for (tk in filteredTokens) {
                     processTokenForAdvanced(tk)
@@ -83,56 +91,58 @@ class SpeechAligner(
         }
     }
 
-    private fun processTranscriptSynchronously(allTranscribedWords: List<String>) {
-        if (allTranscribedWords.size < lastTranscribedWords.size) {
-            lastTranscribedWords = emptyList()
+    private fun processTranscriptSynchronously(allTokens: List<RecognizedToken>) {
+        if (allTokens.size < lastTranscribedTokens.size) {
+            lastTranscribedTokens = emptyList()
         }
 
         var overlap = 0
-        if (lastTranscribedWords.isNotEmpty()) {
-            val maxCheck = min(lastTranscribedWords.size, allTranscribedWords.size)
+        if (lastTranscribedTokens.isNotEmpty()) {
+            val maxCheck = min(lastTranscribedTokens.size, allTokens.size)
             for (k in maxCheck downTo 1) {
-                if (lastTranscribedWords.takeLast(k) == allTranscribedWords.take(k)) {
+                if (lastTranscribedTokens.takeLast(k).map { it.text } == allTokens.take(k).map { it.text }) {
                     overlap = k
                     break
                 }
             }
         }
 
-        val rawNewWords = allTranscribedWords.drop(overlap)
+        val rawNewTokens = allTokens.drop(overlap)
 
         val fillers = setOf("uh", "um", "oh", "ah", "mm", "hmm", "like", "youknow", "erm")
-        val newTranscribedWords = mutableListOf<String>()
+        val newTranscribedTokens = mutableListOf<RecognizedToken>()
         var prev: String? = null
-        for (word in rawNewWords) {
+        for (token in rawNewTokens) {
+            val word = token.text.trim().lowercase()
             if (word in fillers) continue
             if (word == prev) continue
-            newTranscribedWords.add(word)
+            newTranscribedTokens.add(token)
             prev = word
         }
 
-        if (newTranscribedWords.isEmpty()) {
-            lastTranscribedWords = allTranscribedWords
+        if (newTranscribedTokens.isEmpty()) {
+            lastTranscribedTokens = allTokens
             return
         }
 
-        lastTranscribedWords = allTranscribedWords
+        lastTranscribedTokens = allTokens
 
         var storyIndex = wordStates.indexOfFirst { it == WordState.PENDING || it == WordState.INCORRECT }
         if (storyIndex == -1) return
 
         var transcriptIndex = 0
 
-        while (storyIndex < n && transcriptIndex < newTranscribedWords.size) {
+        while (storyIndex < n && transcriptIndex < newTranscribedTokens.size) {
             val storyWordNorm = storyWordsNorm[storyIndex]
-            val transcriptWord = newTranscribedWords[transcriptIndex]
+            val transcriptToken = newTranscribedTokens[transcriptIndex]
+            val transcriptWord = transcriptToken.text
 
             if (wordStates[storyIndex] == WordState.INCORRECT) {
                 // --- Correction Mode --- //
                 if (isFastMatch(transcriptWord, storyWordNorm, isStrict = true)) {
                     wordStates[storyIndex] = WordState.CORRECT
                     ui.markWord(storyIndex, DebtUI.Color.GREEN)
-                    correctionBuffers.remove(storyIndex) // Point D
+                    correctionBuffers.remove(storyIndex)
                     ui.logMetric("correction_success", "idx=${storyIndex}, word='${storyWords[storyIndex]}', by='${transcriptWord}'")
                     storyIndex++
                     transcriptIndex++
@@ -143,12 +153,12 @@ class SpeechAligner(
                 if (nextStoryIndex < n && isFastMatch(transcriptWord, storyWordsNorm[nextStoryIndex], isStrict = false)) {
                     wordStates[storyIndex] = WordState.SKIPPED
                     ui.markWord(storyIndex, DebtUI.Color.RED)
-                    correctionBuffers.remove(storyIndex) // Point D
+                    correctionBuffers.remove(storyIndex)
                     ui.logMetric("skip_user_advanced", "skipped_idx=${storyIndex}, matched_idx=${nextStoryIndex}")
 
                     wordStates[nextStoryIndex] = WordState.CORRECT
                     ui.markWord(nextStoryIndex, DebtUI.Color.GREEN)
-                    correctionBuffers.remove(nextStoryIndex) // Point D
+                    correctionBuffers.remove(nextStoryIndex)
 
                     storyIndex = nextStoryIndex + 1
                     transcriptIndex++
@@ -156,13 +166,13 @@ class SpeechAligner(
                 }
 
                 val attempts = correctionBuffers.getOrPut(storyIndex) { ArrayDeque() }
-                attempts.add(RecognizedToken(transcriptWord))
+                attempts.add(transcriptToken)
                 ui.logMetric("correction_attempt", "idx=${storyIndex}, word='${storyWords[storyIndex]}', attempt='${transcriptWord}', count=${attempts.size}")
 
                 if (attempts.size >= MAX_CORRECTION_ATTEMPTS) {
                     wordStates[storyIndex] = WordState.SKIPPED
                     ui.markWord(storyIndex, DebtUI.Color.RED)
-                    correctionBuffers.remove(storyIndex) // Point D
+                    correctionBuffers.remove(storyIndex)
                     ui.logMetric("skip_max_attempts", "idx=${storyIndex}, word='${storyWords[storyIndex]}', attempts=${attempts.size}")
                     storyIndex++
                 }
@@ -172,18 +182,17 @@ class SpeechAligner(
                 // --- Normal Reading Mode --- //
                 if (isFastMatch(transcriptWord, storyWordNorm, isStrict = false)) {
                     wordStates[storyIndex] = WordState.CORRECT
-                    correctionBuffers.remove(storyIndex) // Point D
+                    correctionBuffers.remove(storyIndex)
                     ui.markWord(storyIndex, DebtUI.Color.GREEN)
                     storyIndex++
                     transcriptIndex++
                 } else {
                     var foundAhead = false
-                    val limit = min(n - 1, storyIndex + MAX_LOOKAHEAD) // Point B: inclusive limit
+                    val limit = min(n - 1, storyIndex + MAX_LOOKAHEAD)
                     val currentScore = WordMatchingUtils.getMatchScore(transcriptWord, storyWordNorm)
 
-                    // Point F: Cooldown for lookahead
                     if (System.currentTimeMillis() - lastLookaheadAt >= LOOKAHEAD_COOLDOWN_MS) {
-                        for (i in (storyIndex + 1)..limit) { // Point B: inclusive loop
+                        for (i in (storyIndex + 1)..limit) {
                             if (wordStates[i] == WordState.PENDING) {
                                 val candidateWordNorm = storyWordsNorm[i]
                                 val candidateScore = WordMatchingUtils.getMatchScore(transcriptWord, candidateWordNorm)
@@ -200,18 +209,18 @@ class SpeechAligner(
                                         if (wordStates[j] == WordState.PENDING) {
                                             wordStates[j] = WordState.SKIPPED
                                             ui.markWord(j, DebtUI.Color.RED)
-                                            correctionBuffers.remove(j) // Point D
+                                            correctionBuffers.remove(j)
                                             ui.logMetric("skip_lookahead", "idx=${j}, reason='lookahead_to_idx_${i}'")
                                         }
                                     }
                                     wordStates[i] = WordState.CORRECT
                                     ui.markWord(i, DebtUI.Color.GREEN)
-                                    correctionBuffers.remove(i) // Point D
+                                    correctionBuffers.remove(i)
 
                                     storyIndex = i + 1
                                     transcriptIndex++
                                     foundAhead = true
-                                    lastLookaheadAt = System.currentTimeMillis() // Point F
+                                    lastLookaheadAt = System.currentTimeMillis()
                                     break
                                 }
                             }
@@ -219,17 +228,67 @@ class SpeechAligner(
                     }
 
                     if (!foundAhead) {
-                        wordStates[storyIndex] = WordState.INCORRECT
-                        correctionBuffers.getOrPut(storyIndex) { ArrayDeque() }
-                        ui.markWord(storyIndex, DebtUI.Color.RED)
-                        ui.logMetric("mark_incorrect", "idx=${storyIndex}, story='${storyWords[storyIndex]}', transcript='${transcriptWord}'")
-                        transcriptIndex++
+                        // --- GRACE BUFFER LOGIC ---
+                        val confidenceThreshold = CONFIDENCE_THRESHOLDS_FOR_INCORRECT[mode]!!
+                        if (transcriptToken.confidence < confidenceThreshold) {
+                            // LOW CONFIDENCE (NOISE) HANDLING
+                            val now = System.currentTimeMillis()
+                            if (now - lastLowConfidenceAt < 800L) { // Consecutive noise
+                                lowConfidenceStreak++
+                            } else {
+                                lowConfidenceStreak = 1
+                            }
+                            lastLowConfidenceAt = now
+
+                            ui.logMetric(
+                                "low_confidence_skip",
+                                "word='${transcriptWord}', conf=${String.format("%.2f", transcriptToken.confidence)}, idx=$storyIndex, streak=$lowConfidenceStreak"
+                            )
+
+                            if (lowConfidenceStreak >= MAX_LOW_CONFIDENCE_STREAK && !isGracePaused) {
+                                isGracePaused = true
+                                ui.logMetric("grace_pause_triggered", "streak=$lowConfidenceStreak")
+                                coroutineScope.launch {
+                                    delay(GRACE_BUFFER_WINDOW_MS)
+                                    if (!isActive) return@launch // NEW: Robustness check
+                                    isGracePaused = false
+                                    lowConfidenceStreak = 0
+                                    ui.logMetric("grace_pause_resumed", "UI updates re-enabled.")
+                                    // NEW: Summary log
+                                    ui.logMetric("grace_window_summary", "duration=${GRACE_BUFFER_WINDOW_MS}ms, streak_trigger=$MAX_LOW_CONFIDENCE_STREAK")
+                                }
+                            }
+                            transcriptIndex++ // Always consume the noise token
+                        } else {
+                            // HIGH CONFIDENCE, GENUINE MISMATCH
+                            lowConfidenceStreak = 0 // Reset noise streak
+
+                            if (!isGracePaused) {
+                                wordStates[storyIndex] = WordState.INCORRECT
+                                correctionBuffers.getOrPut(storyIndex) { ArrayDeque() }
+                                ui.markWord(storyIndex, DebtUI.Color.RED)
+                            }
+                            ui.logMetric(
+                                "mark_incorrect",
+                                "idx=$storyIndex, story='${storyWords[storyIndex]}', transcript='${transcriptWord}', conf=${transcriptToken.confidence}, isPaused=$isGracePaused"
+                            )
+                            transcriptIndex++
+                        }
                     }
                 }
             }
         }
+
         val newCursor = wordStates.indexOfFirst { it == WordState.PENDING || it == WordState.INCORRECT }
-        ui.onAdvanceCursorTo(if (newCursor != -1) newCursor else n)
+        if (newCursor != -1) {
+            ui.onAdvanceCursorTo(newCursor)
+        } else {
+            if (wordStates.lastOrNull() == WordState.SKIPPED) {
+                ui.onAdvanceCursorTo(n - 1)
+            } else {
+                ui.onAdvanceCursorTo(n)
+            }
+        }
     }
 
     private fun processTokenForAdvanced(token: RecognizedToken) {
@@ -238,7 +297,7 @@ class SpeechAligner(
 
         val debtIndex = unreadDebtIndex
         if (debtIndex == null) {
-            val target = storyWordsNorm[cursorIndex] // Use normalized
+            val target = storyWordsNorm[cursorIndex]
             if (isFastMatch(token.text, target, isStrict = false)) {
                 markCorrect(cursorIndex)
             } else {
@@ -246,7 +305,7 @@ class SpeechAligner(
                 unreadDebtIndex = cursorIndex
                 correctionBuffers[cursorIndex] = ArrayDeque()
                 ui.showDebtMarker(cursorIndex)
-                ui.logMetric("debt_created", cursorIndex)
+                ui.logMetric("debt_created", cursorIndex.toString()) // NEW: Consistent logging to String
 
                 tryMatchToFollowing(token)
                 appendToCorrectionBuffer(cursorIndex, token)
@@ -254,9 +313,7 @@ class SpeechAligner(
         } else {
             appendToCorrectionBuffer(debtIndex, token)
             collector?.onDebtBufferUpdated(debtIndex, correctionBuffers[debtIndex]!!.toList())
-
             tryMatchToFollowing(token)
-
             if (correctionBuffers[debtIndex]!!.size >= MAX_LOOKAHEAD) {
                 finalizeDebtAsIncorrect(debtIndex)
             }
@@ -266,11 +323,9 @@ class SpeechAligner(
     @Synchronized
     fun requestStrictReeval(debtIndex: Int, candidateToken: RecognizedToken) {
         if (wordStates.getOrNull(debtIndex) != WordState.UNRESOLVED_DEBT) return
-
         val strictMatcher = { a: String, b: String -> WordMatchingUtils.getMatchScore(a, b) }
         val threshold = strictThresholds[mode]!!
-
-        strictManager?.submitStrictCheck(debtIndex, candidateToken.text, storyWordsNorm[debtIndex], strictMatcher, threshold) { result -> // Use normalized
+        strictManager?.submitStrictCheck(debtIndex, candidateToken.text, storyWordsNorm[debtIndex], strictMatcher, threshold) { result ->
             handleStrictResult(result)
         }
     }
@@ -279,13 +334,10 @@ class SpeechAligner(
     private fun handleStrictResult(result: StrictResult) {
         ui.logMetric("strict_result", "index=${result.debtIndex}, verdict=${result.verdict}, time=${result.timeMs}ms")
         if (wordStates.getOrNull(result.debtIndex) != WordState.UNRESOLVED_DEBT) return
-
         when (result.verdict) {
-            Verdict.GREEN -> {
-                markCorrect(result.debtIndex)
-            }
+            Verdict.GREEN -> markCorrect(result.debtIndex)
             Verdict.RED -> finalizeDebtAsIncorrect(result.debtIndex)
-            Verdict.UNKNOWN -> ui.logMetric("strict_unknown", result.debtIndex)
+            Verdict.UNKNOWN -> ui.logMetric("strict_unknown", result.debtIndex.toString()) // NEW: Consistent logging to String
         }
         advanceCursorPastLocked()
     }
@@ -297,8 +349,7 @@ class SpeechAligner(
             ui.markWord(debtIndex, DebtUI.Color.RED)
             ui.hideDebtMarker(debtIndex)
             correctionBuffers.remove(debtIndex)
-            ui.logMetric("debt_finalized_incorrect", debtIndex)
-
+            ui.logMetric("debt_finalized_incorrect", debtIndex.toString()) // NEW: Consistent logging to String
             if (unreadDebtIndex == debtIndex) unreadDebtIndex = null
             advanceCursorPastLocked()
         }
@@ -309,9 +360,8 @@ class SpeechAligner(
         wordStates[index] = WordState.CORRECT
         ui.markWord(index, DebtUI.Color.GREEN)
         ui.hideDebtMarker(index)
-        correctionBuffers.remove(index) // Point D
-        ui.logMetric("mark_correct", index)
-
+        correctionBuffers.remove(index)
+        ui.logMetric("mark_correct", index.toString()) // NEW: Consistent logging to String
         if (unreadDebtIndex == index) unreadDebtIndex = null
         if (index == cursorIndex) advanceCursorPastLocked()
     }
@@ -320,7 +370,7 @@ class SpeechAligner(
         val limit = min(n - 1, cursorIndex + MAX_LOOKAHEAD)
         for (idx in (cursorIndex + 1)..limit) {
             if (wordStates[idx] == WordState.PENDING) {
-                if (isFastMatch(token.text, storyWordsNorm[idx], isStrict = false)) { // Use normalized
+                if (isFastMatch(token.text, storyWordsNorm[idx], isStrict = false)) {
                     markCorrect(idx)
                     break
                 }
@@ -336,7 +386,7 @@ class SpeechAligner(
     }
 
     private fun advanceCursorPastLocked() {
-        while (cursorIndex < n && (wordStates[cursorIndex] == WordState.CORRECT || wordStates[cursorIndex] == WordState.SKIPPED) ) {
+        while (cursorIndex < n && (wordStates[cursorIndex] == WordState.CORRECT || wordStates[cursorIndex] == WordState.SKIPPED)) {
             cursorIndex++
         }
         ui.onAdvanceCursorTo(cursorIndex)
@@ -350,16 +400,31 @@ class SpeechAligner(
         return isMatch
     }
 
+    // Called for each new recording session
     @Synchronized
     fun reset() {
         wordStates.fill(WordState.PENDING)
         cursorIndex = 0
         unreadDebtIndex = null
         correctionBuffers.clear()
-        lastTranscribedWords = emptyList()
-        lastLookaheadAt = 0L // Point F
+        lastTranscribedTokens = emptyList()
+        lastLookaheadAt = 0L
+
+        // Reset grace buffer state for the new session
+        isGracePaused = false
+        lowConfidenceStreak = 0
+        lastLowConfidenceAt = 0L
+
+        ui.logMetric("aligner_reset", "State reset for new session.")
+    }
+
+    // Should be called from the fragment's onDestroyView
+    @Synchronized
+    fun shutdown() {
+        coroutineScope.cancel() // Cancel any pending coroutines to prevent memory leaks
         collector?.shutdown()
         strictManager?.shutdown()
+        ui.logMetric("aligner_shutdown", "All components shut down.")
     }
 }
 
@@ -370,13 +435,11 @@ class CheapBackgroundCollector(
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "Debt-Collector-Thread").apply { isDaemon = true }
     }
-    private val quickThreshold = 0.55f // A cheap heuristic threshold
+    private val quickThreshold = 0.55f
 
     fun onDebtBufferUpdated(debtIndex: Int, bufferSnapshot: List<RecognizedToken>) {
         executor.execute {
             try {
-                // This should also use the normalized story words, but manager doesn't expose them.
-                // For now, it will use the original, which is a minor inconsistency.
                 val target = manager.storyWords.getOrNull(debtIndex) ?: return@execute
                 for (tk in bufferSnapshot.asReversed()) {
                     val quickScore = WordMatchingUtils.getMatchScore(tk.text, target)
@@ -400,3 +463,6 @@ class CheapBackgroundCollector(
         }
     }
 }
+
+// NOTE: StrictCorrectionManager, Verdict, and StrictResult are NO LONGER defined here.
+// They exist in their own file (StrictCorrectionManager.kt) to fix the Redeclaration errors.

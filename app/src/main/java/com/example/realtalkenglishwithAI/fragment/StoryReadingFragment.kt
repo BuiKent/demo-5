@@ -150,7 +150,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     override fun onDestroyView() {
         super.onDestroyView()
-        speechAligner?.reset()
+        speechAligner?.shutdown() // Correctly call shutdown to release all resources
         if (this::speechManager.isInitialized) {
             speechManager.destroy()
         }
@@ -191,6 +191,10 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     override fun markWord(index: Int, color: DebtUI.Color) {
         activity?.runOnUiThread {
             val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
+            // ========================> THÊM DÒNG NÀY <========================
+            logMetric("ui_word_color", "idx=$index, word='${wordInfo.originalText}', color=${color.name}")
+            // =================================================================
+
             val textColor = when (color) {
                 DebtUI.Color.GREEN -> colorCorrectWord
                 DebtUI.Color.RED -> colorIncorrectWord
@@ -280,15 +284,38 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     private fun updateStoryWordFocus(newFocusGlobalIndex: Int) {
         val oldFocusIndex = currentFocusedWordGlobalIndex
-        if (oldFocusIndex == newFocusGlobalIndex) return
 
-        // Đánh đổi thông minh: Chỉ cập nhật "mớm lời" mỗi 5 từ để cải thiện độ mượt.
-        wordFocusUpdateCounter++
-        if (newFocusGlobalIndex == 0 || wordFocusUpdateCounter % 5 == 0) {
-            updateAsrBiasing(newFocusGlobalIndex)
+        // Log để phân tích hành vi di chuyển con trỏ
+        speechAligner?.wordStates?.let { states ->
+            val totalWords = allWordInfosInStory.size
+            if (totalWords > 0) {
+                val last5States = states.takeLast(5).map { it.name.first() }.joinToString(",")
+                logMetric(
+                    "cursor_update_debug",
+                    "new_idx=$newFocusGlobalIndex, old_idx=$oldFocusIndex, total=$totalWords, last_5=[$last5States]"
+                )
+            }
         }
 
-        // --- Xóa highlight khỏi từ cũ ---
+        // ✅ Trường hợp con trỏ không thay đổi — vẫn phải highlight lại để tránh mất focus
+        if (oldFocusIndex == newFocusGlobalIndex) {
+            allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { currentWord ->
+                val state = speechAligner?.wordStates?.getOrNull(newFocusGlobalIndex)
+                val color = when (state) {
+                    WordState.CORRECT -> colorCorrectWord
+                    WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
+                    else -> colorDefaultText
+                }
+                updateWordSpan(currentWord, color, colorFocusBackground)
+                logMetric(
+                    "ui_word_focus_state",
+                    "idx=$newFocusGlobalIndex, state=${state?.name}, color=YELLOW"
+                )
+            }
+            return
+        }
+
+        // --- Xóa highlight cũ ---
         if (oldFocusIndex != -1) {
             allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
                 val state = speechAligner?.wordStates?.getOrNull(oldFocusIndex)
@@ -297,14 +324,14 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                     WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
                     else -> colorDefaultText
                 }
-                updateWordSpan(oldWord, color, null) // Bỏ background, giữ màu chữ
+                updateWordSpan(oldWord, color, null)
             }
         }
 
-        // Cập nhật con trỏ
+        // --- Cập nhật focus ---
         currentFocusedWordGlobalIndex = newFocusGlobalIndex
 
-        // --- Thêm highlight cho từ mới ---
+        // --- Highlight từ mới ---
         if (newFocusGlobalIndex != -1) {
             allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
                 val state = speechAligner?.wordStates?.getOrNull(newFocusGlobalIndex)
@@ -313,8 +340,18 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
                     WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
                     else -> colorDefaultText
                 }
-                updateWordSpan(newWord, color, colorFocusBackground) // Thêm background
+                updateWordSpan(newWord, color, colorFocusBackground)
+                logMetric(
+                    "ui_word_highlight",
+                    "idx=$newFocusGlobalIndex, word='${newWord.originalText}'"
+                )
             }
+        }
+
+        // --- Cập nhật “mớm lời” mỗi 5 từ ---
+        wordFocusUpdateCounter++
+        if (newFocusGlobalIndex == 0 || wordFocusUpdateCounter % 5 == 0) {
+            updateAsrBiasing(newFocusGlobalIndex)
         }
     }
 
