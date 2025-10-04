@@ -63,6 +63,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     // Tích hợp với ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
+    // Thư viện icon của Material Design
+    implementation("androidx.compose.material:material-icons-extended")
 
 
     // --- CÁC THƯ VIỆN HIỆN CÓ CỦA BẠN ---

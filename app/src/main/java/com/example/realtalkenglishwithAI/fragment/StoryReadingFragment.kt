@@ -10,8 +10,19 @@ import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
@@ -63,7 +74,28 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
 
         binding.composeFabContainer.setContent {
             val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
-            MicFab(isRecording = isRecording) { handleRecordAction() }
+
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Restart Button
+                FloatingActionButton(
+                    onClick = { handleRestartAction() },
+                    containerColor = Color.White,
+                    shape = CircleShape,
+                    modifier = Modifier.border(1.dp, Color.Black, CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.RestartAlt,
+                        contentDescription = "Restart story",
+                        tint = Color.Black
+                    )
+                }
+
+                // Mic Button (Pause/Resume)
+                MicFab(isRecording = isRecording) { handleRecordAction() }
+            }
         }
         binding.contentMain.composeStoryContainer.setContent {
             val words by viewModel.words.collectAsStateWithLifecycle()
@@ -118,15 +150,27 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
         logMetric("system_initialized", "mode=${currentMode.name}, words=${storyWords.size}")
     }
 
+    private fun handleRestartAction() {
+        if (speechRecognitionManager == null || speechAligner == null) {
+            checkPermissionsAndInit()
+            return
+        }
+        // CORRECTED: Reset the UI state by re-initializing the words in the ViewModel
+        viewModel.setWords(args.storyContent)
+
+        speechAligner?.reset() // Reset backend cursor to beginning
+        speechRecognitionManager?.startListening() // Start recording
+    }
+
     private fun handleRecordAction() {
         if (viewModel.isRecording.value) {
-            speechRecognitionManager?.stopListening()
+            speechRecognitionManager?.stopListening() // This is now PAUSE
         } else {
             if (speechRecognitionManager == null || speechAligner == null) {
                 checkPermissionsAndInit()
                 return
             }
-            speechAligner?.reset()
+            // `speechAligner?.reset()` is removed. This is now RESUME.
             speechRecognitionManager?.startListening()
         }
     }
@@ -183,7 +227,7 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
     }
 
     override fun logMetric(key: String, value: Any) {
-        Log.d("SpeechAlignerMetric", "$key: $value")
+        Log.d("RealTalkMetrics", "$key: $value")
     }
 
     private fun showToast(message: String) {
