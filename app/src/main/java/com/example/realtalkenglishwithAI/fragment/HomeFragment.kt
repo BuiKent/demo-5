@@ -24,6 +24,7 @@ class HomeFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val storyViewModel: StoryViewModel by viewModels()
+    private var isNavigating = false // The new, stronger guard
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -40,6 +41,12 @@ class HomeFragment : Fragment() {
         setupRoleplayRecyclerView()
         setupStoriesRecyclerView()
         observeViewModel()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Reset the lock when the user returns to this screen
+        isNavigating = false
     }
 
     private fun setupDifficultySlider() {
@@ -81,7 +88,7 @@ class HomeFragment : Fragment() {
         val scenarios = listOf(
             RoleplayScenario("Greetings", "https://placehold.co/300x400/6200EE/FFFFFF?text=Hi!"),
             RoleplayScenario("At a Cafe", "https://placehold.co/300x400/03DAC5/000000?text=Cafe"),
-            RoleplayScenario("At Home", "https://placehold.co/300x400/3700B3/FFFFFF?text=Home"),
+            RoleplayScenario("At a Home", "https://placehold.co/300x400/3700B3/FFFFFF?text=Home"),
             RoleplayScenario("Travel", "https://placehold.co/300x400/000000/FFFFFF?text=Travel")
         )
 
@@ -93,11 +100,15 @@ class HomeFragment : Fragment() {
 
     private fun setupStoriesRecyclerView() {
         val storyAdapter = StoryAdapter { story ->
-            val bundle = bundleOf(
-                "story_content" to story.content,
-                "story_title" to story.title
-            )
-            findNavController().navigate(R.id.action_homeFragment_to_storyReadingFragment, bundle)
+            // The final, robust check for double-click
+            if (!isNavigating && findNavController().currentDestination?.id == R.id.homeFragment) {
+                isNavigating = true // Lock navigation
+                val bundle = bundleOf(
+                    "story_content" to story.content,
+                    "story_title" to story.title
+                )
+                findNavController().navigate(R.id.action_homeFragment_to_storyReadingFragment, bundle)
+            }
         }
 
         binding.storiesRecyclerView.apply {

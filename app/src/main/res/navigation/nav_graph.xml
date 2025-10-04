@@ -10,7 +10,6 @@
         android:name="com.example.realtalkenglishwithAI.fragment.HomeFragment"
         android:label="Home"
         tools:layout="@layout/fragment_home">
-        <!-- Action to navigate directly from Home to Reading Screen -->
         <action
             android:id="@+id/action_homeFragment_to_storyReadingFragment"
             app:destination="@id/storyReadingFragment" />
@@ -34,31 +33,18 @@
         android:label="Profile"
         tools:layout="@layout/fragment_profile" />
 
+    <!-- This destination is now a Fragment that hosts our Composable screen -->
     <fragment
         android:id="@+id/storyReadingFragment"
-        android:name="com.example.realtalkenglishwithAI.fragment.StoryReadingFragment"
-        android:label="Read Story" 
-        tools:layout="@layout/fragment_story_reading">
-        <!-- Argument without a default value MUST be declared first. -->
+        android:name="com.example.realtalkenglishwithAI.fragment.StoryReadingComposeFragment"
+        android:label="Read Story"
+        tools:layout="@layout/fragment_story_reading_compose">
         <argument
             android:name="story_content"
             app:argType="string" />
         <argument
             android:name="story_title"
-            app:argType="string"
-            android:defaultValue="Story" />
-    </fragment>
-
-    <!-- This fragment is now orphaned, as HomeFragment navigates directly to StoryReadingFragment. -->
-    <!-- It can be removed if it's no longer needed anywhere. -->
-    <fragment
-        android:id="@+id/storyFragment"
-        android:name="com.example.realtalkenglishwithAI.fragment.StoryFragment"
-        android:label="Stories"
-        tools:layout="@layout/fragment_story">
-        <action
-            android:id="@+id/action_storyFragment_to_storyReadingFragment"
-            app:destination="@id/storyReadingFragment" />
+            app:argType="string" />
     </fragment>
 
 </navigation>

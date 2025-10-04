@@ -77,6 +77,7 @@ dependencies {
     // Navigation
     implementation("androidx.navigation:navigation-fragment-ktx:2.8.3")
     implementation("androidx.navigation:navigation-ui-ktx:2.8.3")
+    implementation("androidx.navigation:navigation-compose:2.8.3") // <-- ADDED FOR COMPOSE NAVIGATION
 
     // ViewModel and LiveData
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
