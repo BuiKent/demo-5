@@ -48,7 +48,7 @@ android {
     }
 
     aaptOptions {
-        noCompress("vosk")
+        noCompress(".zip") // Sửa lại để không nén các file có đuôi .zip
     }
 }
 
