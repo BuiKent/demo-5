@@ -4,456 +4,175 @@ import android.Manifest
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
-import android.graphics.Color
 import android.os.Bundle
-import android.text.Spannable
-import android.text.SpannableString
-import android.text.style.BackgroundColorSpan
-import android.text.style.ForegroundColorSpan
-import android.text.style.UnderlineSpan
-import android.util.TypedValue
-import android.view.*
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.util.Log
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
-import androidx.core.view.MenuHost
-import androidx.core.view.MenuProvider
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.Lifecycle
-import androidx.navigation.fragment.findNavController
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.fragment.navArgs
 import com.example.realtalkenglishwithAI.R
 import com.example.realtalkenglishwithAI.databinding.FragmentStoryReadingBinding
-import com.example.realtalkenglishwithAI.utils.*
-import com.example.realtalkenglishwithAI.utils.Mode as DebtMode
+import com.example.realtalkenglishwithAI.ui.composables.MicFab
+import com.example.realtalkenglishwithAI.ui.composables.StoryContent
+import com.example.realtalkenglishwithAI.utils.DebtUI
+import com.example.realtalkenglishwithAI.utils.RecognizedToken
+import com.example.realtalkenglishwithAI.utils.SpeechAligner
+import com.example.realtalkenglishwithAI.utils.SpeechRecognitionManager
+import com.example.realtalkenglishwithAI.viewmodel.StoryReadingViewModel
 
-class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognitionManagerListener, DebtUI {
+class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
+    SpeechRecognitionManager.SpeechRecognitionManagerListener, DebtUI {
 
     private var _binding: FragmentStoryReadingBinding? = null
     private val binding get() = _binding!!
 
-    // --- Hybrid System & Dependencies ---
-    private lateinit var featureFlags: LocalFeatureFlagController
-    private lateinit var metrics: MetricsEmitter
+    private val viewModel: StoryReadingViewModel by viewModels()
+    private val args: StoryReadingFragmentArgs by navArgs()
+
+    private var speechRecognitionManager: SpeechRecognitionManager? = null
     private var speechAligner: SpeechAligner? = null
-    private var strictManager: StrictCorrectionManager? = null
+    private lateinit var prefs: SharedPreferences
 
-    // --- Speech Recognition ---
-    private lateinit var speechManager: SpeechRecognitionManager
-    private lateinit var sharedPreferences: SharedPreferences
-    @Volatile private var isUserRecording = false
-
-    // --- Story and Word State ---
-    private var currentStoryContent: String? = null
-    private var currentStoryTitle: String? = null
-    private val sentenceTextViews = mutableListOf<TextView>()
-    private val sentenceSpannables = mutableListOf<SpannableString>()
-    private val allWordInfosInStory = mutableListOf<WordInfo>()
-    @Volatile private var currentFocusedWordGlobalIndex: Int = -1
-    private var difficultyLevel = 1 // 0: Beginner, 1: Intermediate, 2: Advanced
-    private var wordFocusUpdateCounter = 0 // Đếm số lần con trỏ di chuyển để giảm tần suất cập nhật biasing
-
-    // --- UI Colors & ASR Biasing Constants ---
-    private var colorDefaultText: Int = Color.BLACK
-    private var colorCorrectWord: Int = Color.GREEN
-    private var colorIncorrectWord: Int = Color.RED
-    private var colorFocusBackground: Int = Color.YELLOW
-    private val BIAS_WINDOW_SIZE = 50
-    private val BIAS_WINDOW_LOOK_BACK = 10
-    private val BIAS_WINDOW_LOOK_FORWARD = BIAS_WINDOW_SIZE - BIAS_WINDOW_LOOK_BACK
-
-    // --- Data Class for UI positioning ---
-    data class WordInfo(
-        val originalText: String,
-        val normalizedText: String,
-        val sentenceIndex: Int,
-        val wordIndexInSentence: Int,
-        val startCharInSentence: Int,
-        val endCharInSentence: Int
-    )
-
-    private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-        if (isGranted) handleRecordAction() else Toast.makeText(requireContext(), "Record permission denied.", Toast.LENGTH_SHORT).show()
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        arguments?.let {
-            currentStoryContent = it.getString(ARG_STORY_CONTENT)
-            currentStoryTitle = it.getString(ARG_STORY_TITLE)
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            setupStoryAndManagers()
+        } else {
+            showToast("Permission for microphone is required.")
         }
-        if (currentStoryContent == null || currentStoryTitle == null) {
-            findNavController().popBackStack()
-            return
-        }
-        context?.let { ctx ->
-            colorDefaultText = ContextCompat.getColor(ctx, android.R.color.black)
-            colorCorrectWord = ContextCompat.getColor(ctx, R.color.blue_500)
-            colorIncorrectWord = ContextCompat.getColor(ctx, R.color.red_500)
-            colorFocusBackground = ContextCompat.getColor(ctx, R.color.focused_word_background)
-        }
-    }
-
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        _binding = FragmentStoryReadingBinding.inflate(inflater, container, false)
-        return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        if (currentStoryContent == null || currentStoryTitle == null) return
+        _binding = FragmentStoryReadingBinding.bind(view)
 
-        // --- Setup Dependencies ---
-        sharedPreferences = requireActivity().getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-        featureFlags = LocalFeatureFlagController()
-        metrics = LogcatMetricsCollector("RealTalkMetrics")
-        difficultyLevel = sharedPreferences.getInt("DIFFICULTY_LEVEL", 1)
+        prefs = requireContext().getSharedPreferences("realtalk_prefs", Context.MODE_PRIVATE)
+        
+        // Set toolbar title from arguments
+        (activity as? AppCompatActivity)?.supportActionBar?.title = args.storyTitle
 
-        setupSpeechManager()
-        setupToolbar()
-        setupMenu()
-        displayInitialStoryContent(currentStoryContent!!, binding.linearLayoutResultsContainer)
-        setupClickListeners()
-        updateFabStates()
-    }
-
-    // --- Setup & Lifecycle Methods --- //
-    private fun setupSpeechManager() {
-        speechManager = SpeechRecognitionManager(requireContext(), this, sharedPreferences)
-    }
-
-    private fun initializeHybridSystem() {
-        val storyWords = allWordInfosInStory.map { it.normalizedText }
-        val currentMode = when(difficultyLevel) {
-            0 -> DebtMode.Beginner
-            1 -> DebtMode.Intermediate
-            2 -> DebtMode.Advanced
-            else -> DebtMode.Intermediate
+        binding.composeFabContainer.setContent {
+            val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
+            MicFab(isRecording = isRecording) { handleRecordAction() }
+        }
+        binding.contentMain.composeStoryContainer.setContent {
+            val words by viewModel.words.collectAsStateWithLifecycle()
+            StoryContent(words = words)
         }
 
-        speechAligner = SpeechAligner(storyWords, this, currentMode).apply {
-            if (currentMode == DebtMode.Advanced) {
-                if (featureFlags.isEnabled(FeatureFlag.CHEAP_COLLECTOR)) {
-                    this.collector = CheapBackgroundCollector(this, currentMode)
-                }
-                if (featureFlags.isEnabled(FeatureFlag.STRICT_CORRECTION)) {
-                    this@StoryReadingFragment.strictManager = StrictCorrectionManager()
-                    this.strictManager = this@StoryReadingFragment.strictManager
-                }
+        checkPermissionsAndInit()
+    }
+
+    private fun checkPermissionsAndInit() {
+        when {
+            ContextCompat.checkSelfPermission(
+                requireContext(),
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                setupStoryAndManagers()
+            }
+
+            else -> {
+                requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
-        metrics.emit("system_initialized", mapOf("system" to "hybrid", "word_count" to storyWords.size, "mode" to currentMode.name))
     }
 
-    override fun onDestroyView() {
-        super.onDestroyView()
-        speechAligner?.shutdown() // Correctly call shutdown to release all resources
-        if (this::speechManager.isInitialized) {
-            speechManager.destroy()
+    private fun setupStoryAndManagers() {
+        if (speechAligner != null) return
+
+        // Use story content from arguments
+        val storyText = args.storyContent
+        val storyWords = storyText.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+        viewModel.setWords(storyText)
+        speechAligner = SpeechAligner(storyWords, this)
+
+        if (speechRecognitionManager == null) {
+            speechRecognitionManager = SpeechRecognitionManager(requireContext(), this, prefs)
         }
-        _binding = null
+
+        speechRecognitionManager?.updateBiasingStrings(storyWords)
     }
 
-    // --- Speech Recognition Callbacks --- //
-
-    override fun onPartialResults(transcript: String) {
-        activity?.runOnUiThread {
-            val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
-            speechAligner?.onRecognizedWords(tokens)
-        }
-    }
-
-    override fun onFinalResults(transcript: String) {
-        activity?.runOnUiThread {
-            val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
-            speechAligner?.onRecognizedWords(tokens)
-        }
-    }
-
-    override fun onError(error: Int, isCritical: Boolean) {
-        activity?.runOnUiThread {
-            if (isCritical) Toast.makeText(requireContext(), SpeechRecognitionManager.getErrorText(error), Toast.LENGTH_SHORT).show()
+    private fun handleRecordAction() {
+        if (viewModel.isRecording.value) {
+            speechRecognitionManager?.stopListening()
+        } else {
+            if (speechRecognitionManager == null || speechAligner == null) {
+                checkPermissionsAndInit()
+                return
+            }
+            speechAligner?.reset()
+            speechRecognitionManager?.startListening()
         }
     }
 
     override fun onStateChanged(state: SpeechRecognitionManager.State) {
-        activity?.runOnUiThread {
-            isUserRecording = state == SpeechRecognitionManager.State.LISTENING
-            updateFabStates()
-        }
+        val isRecording = state == SpeechRecognitionManager.State.LISTENING
+        viewModel.setRecording(isRecording)
     }
 
-    // --- DebtUI Interface Implementation --- //
+    override fun onPartialResults(transcript: String) {
+        val tokens = transcript.split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .map { RecognizedToken(text = it) }
+        speechAligner?.onRecognizedWords(tokens)
+    }
+
+    override fun onFinalResults(transcript: String) {
+        val tokens = transcript.split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .map { RecognizedToken(text = it) }
+        speechAligner?.onRecognizedWords(tokens)
+    }
+
+    override fun onError(error: Int, isCritical: Boolean) {
+        val errorMessage = SpeechRecognitionManager.getErrorText(error)
+        showToast("Recognition error: $errorMessage")
+        viewModel.setRecording(false)
+    }
 
     override fun markWord(index: Int, color: DebtUI.Color) {
-        activity?.runOnUiThread {
-            val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
-            // ========================> THÊM DÒNG NÀY <========================
-            logMetric("ui_word_color", "idx=$index, word='${wordInfo.originalText}', color=${color.name}")
-            // =================================================================
-
-            val textColor = when (color) {
-                DebtUI.Color.GREEN -> colorCorrectWord
-                DebtUI.Color.RED -> colorIncorrectWord
-                else -> colorDefaultText
-            }
-            updateWordSpan(wordInfo, textColor, null, removeAllSpans = true)
+        val colorResId = when (color) {
+            DebtUI.Color.GREEN -> R.color.word_correct
+            DebtUI.Color.RED -> R.color.word_incorrect
+            DebtUI.Color.DEFAULT -> R.color.word_default
         }
-    }
-
-    override fun showDebtMarker(index: Int) {
-        activity?.runOnUiThread {
-            val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
-            val spannable = sentenceSpannables[wordInfo.sentenceIndex]
-            val start = wordInfo.startCharInSentence
-            val end = wordInfo.endCharInSentence
-            if (start < 0 || end > spannable.length) return@runOnUiThread
-            spannable.setSpan(UnderlineSpan(), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-            sentenceTextViews[wordInfo.sentenceIndex].text = spannable
-        }
-    }
-
-    override fun hideDebtMarker(index: Int) {
-        activity?.runOnUiThread {
-            val wordInfo = allWordInfosInStory.getOrNull(index) ?: return@runOnUiThread
-            val spannable = sentenceSpannables[wordInfo.sentenceIndex]
-            val start = wordInfo.startCharInSentence
-            val end = wordInfo.endCharInSentence
-            if (start < 0 || end > spannable.length) return@runOnUiThread
-            spannable.getSpans(start, end, UnderlineSpan::class.java).forEach { spannable.removeSpan(it) }
-            sentenceTextViews[wordInfo.sentenceIndex].text = spannable
-        }
+        val composeColor = Color(ContextCompat.getColor(requireContext(), colorResId))
+        viewModel.updateWordColor(index, composeColor)
     }
 
     override fun onAdvanceCursorTo(index: Int) {
-        activity?.runOnUiThread {
-            updateStoryWordFocus(index)
-        }
+        viewModel.setWordFocus(index)
+    }
+
+    override fun showDebtMarker(index: Int) { /* For later */
+    }
+
+    override fun hideDebtMarker(index: Int) { /* For later */
     }
 
     override fun logMetric(key: String, value: Any) {
-        metrics.emit(key, mapOf("value" to value))
+        Log.d("SpeechAlignerMetric", "$key: $value")
     }
 
-    // --- UI Update and Management --- //
-
-    private fun displayInitialStoryContent(storyText: String, container: LinearLayout) {
-        container.removeAllViews()
-        sentenceTextViews.clear(); sentenceSpannables.clear(); allWordInfosInStory.clear()
-
-        val sentences = storyText.split(Regex("(?<=[.!?;:])\\s+")).filter { it.isNotBlank() }
-
-        sentences.forEachIndexed { sentenceIdx, sentenceStr ->
-            val spannable = SpannableString(sentenceStr)
-            TextView(requireContext()).apply {
-                text = spannable
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                setTextColor(colorDefaultText)
-                setPadding(4, 8, 4, 8)
-                setLineSpacing(0f, 1.2f)
-            }.also { container.addView(it); sentenceTextViews.add(it) }
-            sentenceSpannables.add(spannable)
-
-            var currentWordStartChar = 0
-            sentenceStr.split(Regex("\\s+")).filter { it.isNotBlank() }.forEachIndexed { wordIdxInSent, word ->
-                val normalizedWord = normalizeToken(word)
-                if (normalizedWord.isNotEmpty()) {
-                    val start = sentenceStr.indexOf(word, currentWordStartChar)
-                    if (start != -1) {
-                        val end = start + word.length
-                        allWordInfosInStory.add(WordInfo(word, normalizedWord, sentenceIdx, wordIdxInSent, start, end))
-                        currentWordStartChar = end
-                    }
-                }
-            }
-        }
-        initializeHybridSystem()
+    private fun showToast(message: String) {
+        Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
     }
 
-    private fun resetAllWordStatesAndColors() {
-        speechAligner?.reset()
-        initializeHybridSystem()
-        updateStoryWordFocus(-1) // Reset focus
-        allWordInfosInStory.forEach { info ->
-            updateWordSpan(info, colorDefaultText, null, removeAllSpans = true)
-        }
-    }
-
-    private fun updateStoryWordFocus(newFocusGlobalIndex: Int) {
-        val oldFocusIndex = currentFocusedWordGlobalIndex
-
-        // Log để phân tích hành vi di chuyển con trỏ
-        speechAligner?.wordStates?.let { states ->
-            val totalWords = allWordInfosInStory.size
-            if (totalWords > 0) {
-                val last5States = states.takeLast(5).map { it.name.first() }.joinToString(",")
-                logMetric(
-                    "cursor_update_debug",
-                    "new_idx=$newFocusGlobalIndex, old_idx=$oldFocusIndex, total=$totalWords, last_5=[$last5States]"
-                )
-            }
-        }
-
-        // ✅ Trường hợp con trỏ không thay đổi — vẫn phải highlight lại để tránh mất focus
-        if (oldFocusIndex == newFocusGlobalIndex) {
-            allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { currentWord ->
-                val state = speechAligner?.wordStates?.getOrNull(newFocusGlobalIndex)
-                val color = when (state) {
-                    WordState.CORRECT -> colorCorrectWord
-                    WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
-                    else -> colorDefaultText
-                }
-                updateWordSpan(currentWord, color, colorFocusBackground)
-                logMetric(
-                    "ui_word_focus_state",
-                    "idx=$newFocusGlobalIndex, state=${state?.name}, color=YELLOW"
-                )
-            }
-            return
-        }
-
-        // --- Xóa highlight cũ ---
-        if (oldFocusIndex != -1) {
-            allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
-                val state = speechAligner?.wordStates?.getOrNull(oldFocusIndex)
-                val color = when (state) {
-                    WordState.CORRECT -> colorCorrectWord
-                    WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
-                    else -> colorDefaultText
-                }
-                updateWordSpan(oldWord, color, null)
-            }
-        }
-
-        // --- Cập nhật focus ---
-        currentFocusedWordGlobalIndex = newFocusGlobalIndex
-
-        // --- Highlight từ mới ---
-        if (newFocusGlobalIndex != -1) {
-            allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
-                val state = speechAligner?.wordStates?.getOrNull(newFocusGlobalIndex)
-                val color = when (state) {
-                    WordState.CORRECT -> colorCorrectWord
-                    WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
-                    else -> colorDefaultText
-                }
-                updateWordSpan(newWord, color, colorFocusBackground)
-                logMetric(
-                    "ui_word_highlight",
-                    "idx=$newFocusGlobalIndex, word='${newWord.originalText}'"
-                )
-            }
-        }
-
-        // --- Cập nhật “mớm lời” mỗi 5 từ ---
-        wordFocusUpdateCounter++
-        if (newFocusGlobalIndex == 0 || wordFocusUpdateCounter % 5 == 0) {
-            updateAsrBiasing(newFocusGlobalIndex)
-        }
-    }
-
-    private fun updateWordSpan(wordInfo: WordInfo, textColor: Int, newBackgroundColor: Int?, removeAllSpans: Boolean = false) {
-        if (wordInfo.sentenceIndex >= sentenceSpannables.size) return
-        val spannable = sentenceSpannables[wordInfo.sentenceIndex]
-        val start = wordInfo.startCharInSentence
-        val end = wordInfo.endCharInSentence
-        if (start < 0 || end > spannable.length || start >= end) return
-
-        if (removeAllSpans) {
-            spannable.getSpans(start, end, Any::class.java).forEach { spannable.removeSpan(it) }
-        }
-        spannable.getSpans(start, end, BackgroundColorSpan::class.java).forEach { spannable.removeSpan(it) }
-
-        spannable.setSpan(ForegroundColorSpan(textColor), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-        newBackgroundColor?.let { spannable.setSpan(BackgroundColorSpan(it), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE) }
-
-        sentenceTextViews[wordInfo.sentenceIndex].text = spannable
-    }
-
-    private fun setupClickListeners() {
-        binding.buttonRecordStorySentence.setOnClickListener { handleRecordAction() }
-    }
-
-    private fun handleRecordAction() {
-        if (!this::speechManager.isInitialized || !speechManager.isAvailable) {
-            Toast.makeText(requireContext(), "Speech recognizer is not available.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            return
-        }
-
-        if (isUserRecording) {
-            speechManager.stopListening()
-        } else {
-            wordFocusUpdateCounter = 0 // Reset bộ đếm cho phiên ghi âm mới
-            resetAllWordStatesAndColors()
-            // Focus vào từ đầu tiên, hành động này sẽ kích hoạt updateAsrBiasing
-            updateStoryWordFocus(0)
-            speechManager.startListening()
-        }
-    }
-
-    private fun normalizeToken(s: String): String = s.lowercase().replace(Regex("[^a-z0-9']"), "")
-
-    private fun updateFabStates() {
-        binding.buttonRecordStorySentence.apply {
-            val tint = if (isUserRecording) Color.WHITE else Color.BLACK
-            setImageResource(if (isUserRecording) R.drawable.ic_stop else R.drawable.ic_mic)
-            backgroundTintList = ColorStateList.valueOf(if (isUserRecording) colorIncorrectWord else Color.WHITE)
-            imageTintList = ColorStateList.valueOf(tint)
-        }
-    }
-
-    private fun setupToolbar() {
-        (activity as AppCompatActivity).setSupportActionBar(binding.toolbarStoryReading)
-        (activity as? AppCompatActivity)?.supportActionBar?.title = currentStoryTitle ?: "Story"
-        (activity as? AppCompatActivity)?.supportActionBar?.setDisplayHomeAsUpEnabled(true)
-    }
-
-    private fun setupMenu() {
-        (requireActivity() as MenuHost).addMenuProvider(object : MenuProvider {
-            override fun onCreateMenu(menu: Menu, menuInflater: MenuInflater) {
-                menuInflater.inflate(R.menu.story_reading_menu, menu)
-            }
-            override fun onMenuItemSelected(menuItem: MenuItem): Boolean {
-                if (menuItem.itemId == android.R.id.home) {
-                    findNavController().navigateUp()
-                    return true
-                }
-                return false
-            }
-        }, viewLifecycleOwner, Lifecycle.State.RESUMED)
-    }
-
-    // --- ASR Biasing Logic ---
-    private fun updateAsrBiasing(newFocusIndex: Int) {
-        if (!this::speechManager.isInitialized) return
-
-        if (newFocusIndex < 0) {
-            // Nếu không có từ nào được focus, xóa danh sách "mớm lời"
-            speechManager.updateBiasingStrings(emptyList())
-            return
-        }
-
-        val start = (newFocusIndex - BIAS_WINDOW_LOOK_BACK).coerceAtLeast(0)
-        val end = (newFocusIndex + BIAS_WINDOW_LOOK_FORWARD).coerceAtMost(allWordInfosInStory.size)
-
-        val biasList = allWordInfosInStory.subList(start, end)
-            .map { it.normalizedText }
-            .distinct()
-
-        speechManager.updateBiasingStrings(biasList)
-    }
-
-    companion object {
-        private const val ARG_STORY_CONTENT = "story_content"
-        private const val ARG_STORY_TITLE = "story_title"
-        private const val TAG = "StoryReadingFragment"
+    override fun onDestroyView() {
+        super.onDestroyView()
+        speechRecognitionManager?.destroy()
+        speechAligner?.shutdown()
+        _binding = null
     }
 }

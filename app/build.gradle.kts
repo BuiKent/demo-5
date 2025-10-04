@@ -1,11 +1,13 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("com.google.devtools.ksp")}
+    id("com.google.devtools.ksp")
+    id("androidx.navigation.safeargs.kotlin")
+}
 
 android {
     namespace = "com.example.realtalkenglishwithAI"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.realtalkenglishwithAI"

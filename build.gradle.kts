@@ -8,4 +8,7 @@ plugins {
 
     // KSP: Phiên bản khớp với Kotlin (1.9.25-1.0.20)
     id("com.google.devtools.ksp") version "1.9.25-1.0.20" apply false
+
+    // THÊM KHAI BÁO SAFE ARGS
+    id("androidx.navigation.safeargs.kotlin") version "2.8.3" apply false
 }
