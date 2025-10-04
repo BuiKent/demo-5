@@ -25,7 +25,7 @@ interface DebtUI {
     fun logMetric(key: String, value: Any)
 }
 
-class Phase0Manager(
+class SpeechAligner(
     val storyWords: List<String>,
     val ui: DebtUI,
     private val mode: Mode = Mode.Intermediate
@@ -65,18 +65,18 @@ class Phase0Manager(
     @Synchronized
     fun onRecognizedWords(tokens: List<RecognizedToken>) {
         if (tokens.isEmpty()) return
-        ui.logMetric("phase0_tokens_in", tokens.size)
+        ui.logMetric("tokens_in", tokens.size)
 
         // Point C: Filter tokens by confidence
         val filteredTokens = tokens.filter { it.confidence >= MIN_TOKEN_CONFIDENCE }
         val allTranscribedWords = filteredTokens.map { it.text.trim().lowercase() }.filter { it.isNotBlank() }
         val fullTranscript = allTranscribedWords.joinToString(" ")
-        ui.logMetric("phase0_full_transcript", fullTranscript)
+        ui.logMetric("full_transcript", fullTranscript)
 
         when (mode) {
             Mode.Beginner, Mode.Intermediate -> processTranscriptSynchronously(allTranscribedWords)
             Mode.Advanced -> {
-                for (tk in filteredTokens) { 
+                for (tk in filteredTokens) {
                     processTokenForAdvanced(tk)
                 }
             }
@@ -98,7 +98,7 @@ class Phase0Manager(
                 }
             }
         }
-        
+
         val rawNewWords = allTranscribedWords.drop(overlap)
 
         val fillers = setOf("uh", "um", "oh", "ah", "mm", "hmm", "like", "youknow", "erm")
@@ -117,7 +117,7 @@ class Phase0Manager(
         }
 
         lastTranscribedWords = allTranscribedWords
-        
+
         var storyIndex = wordStates.indexOfFirst { it == WordState.PENDING || it == WordState.INCORRECT }
         if (storyIndex == -1) return
 
@@ -133,7 +133,7 @@ class Phase0Manager(
                     wordStates[storyIndex] = WordState.CORRECT
                     ui.markWord(storyIndex, DebtUI.Color.GREEN)
                     correctionBuffers.remove(storyIndex) // Point D
-                    ui.logMetric("phase0_correction_success", "idx=${storyIndex}, word='${storyWords[storyIndex]}', by='${transcriptWord}'")
+                    ui.logMetric("correction_success", "idx=${storyIndex}, word='${storyWords[storyIndex]}', by='${transcriptWord}'")
                     storyIndex++
                     transcriptIndex++
                     continue
@@ -144,12 +144,12 @@ class Phase0Manager(
                     wordStates[storyIndex] = WordState.SKIPPED
                     ui.markWord(storyIndex, DebtUI.Color.RED)
                     correctionBuffers.remove(storyIndex) // Point D
-                    ui.logMetric("phase0_skip_user_advanced", "skipped_idx=${storyIndex}, matched_idx=${nextStoryIndex}")
-                    
+                    ui.logMetric("skip_user_advanced", "skipped_idx=${storyIndex}, matched_idx=${nextStoryIndex}")
+
                     wordStates[nextStoryIndex] = WordState.CORRECT
                     ui.markWord(nextStoryIndex, DebtUI.Color.GREEN)
                     correctionBuffers.remove(nextStoryIndex) // Point D
-                    
+
                     storyIndex = nextStoryIndex + 1
                     transcriptIndex++
                     continue
@@ -157,17 +157,17 @@ class Phase0Manager(
 
                 val attempts = correctionBuffers.getOrPut(storyIndex) { ArrayDeque() }
                 attempts.add(RecognizedToken(transcriptWord))
-                ui.logMetric("phase0_correction_attempt", "idx=${storyIndex}, word='${storyWords[storyIndex]}', attempt='${transcriptWord}', count=${attempts.size}")
+                ui.logMetric("correction_attempt", "idx=${storyIndex}, word='${storyWords[storyIndex]}', attempt='${transcriptWord}', count=${attempts.size}")
 
                 if (attempts.size >= MAX_CORRECTION_ATTEMPTS) {
                     wordStates[storyIndex] = WordState.SKIPPED
                     ui.markWord(storyIndex, DebtUI.Color.RED)
                     correctionBuffers.remove(storyIndex) // Point D
-                    ui.logMetric("phase0_skip_max_attempts", "idx=${storyIndex}, word='${storyWords[storyIndex]}', attempts=${attempts.size}")
-                    storyIndex++ 
+                    ui.logMetric("skip_max_attempts", "idx=${storyIndex}, word='${storyWords[storyIndex]}', attempts=${attempts.size}")
+                    storyIndex++
                 }
                 transcriptIndex++
-                
+
             } else {
                 // --- Normal Reading Mode --- //
                 if (isFastMatch(transcriptWord, storyWordNorm, isStrict = false)) {
@@ -188,12 +188,12 @@ class Phase0Manager(
                                 val candidateWordNorm = storyWordsNorm[i]
                                 val candidateScore = WordMatchingUtils.getMatchScore(transcriptWord, candidateWordNorm)
                                 val candidateIsShort = candidateWordNorm.length <= 2
-                                
-                                val acceptLookahead = candidateScore >= LOOKAHEAD_MIN_SCORE &&
-                                                      (candidateScore - currentScore) >= LOOKAHEAD_MARGIN &&
-                                                      (!candidateIsShort || candidateWordNorm == transcriptWord)
 
-                                ui.logMetric("phase0_lookahead_decision", "idx=${i}, transcript='${transcriptWord}', currentScore=${String.format("%.2f", currentScore)}, candidate='${candidateWordNorm}', candidateScore=${String.format("%.2f", candidateScore)}, delta=${String.format("%.2f", candidateScore - currentScore)}, accepted=${acceptLookahead}")
+                                val acceptLookahead = candidateScore >= LOOKAHEAD_MIN_SCORE &&
+                                        (candidateScore - currentScore) >= LOOKAHEAD_MARGIN &&
+                                        (!candidateIsShort || candidateWordNorm == transcriptWord)
+
+                                ui.logMetric("lookahead_decision", "idx=${i}, transcript='${transcriptWord}', currentScore=${String.format("%.2f", currentScore)}, candidate='${candidateWordNorm}', candidateScore=${String.format("%.2f", candidateScore)}, delta=${String.format("%.2f", candidateScore - currentScore)}, accepted=${acceptLookahead}")
 
                                 if (acceptLookahead) {
                                     for (j in storyIndex until i) {
@@ -201,13 +201,13 @@ class Phase0Manager(
                                             wordStates[j] = WordState.SKIPPED
                                             ui.markWord(j, DebtUI.Color.RED)
                                             correctionBuffers.remove(j) // Point D
-                                            ui.logMetric("phase0_skip_lookahead", "idx=${j}, reason='lookahead_to_idx_${i}'")
+                                            ui.logMetric("skip_lookahead", "idx=${j}, reason='lookahead_to_idx_${i}'")
                                         }
                                     }
                                     wordStates[i] = WordState.CORRECT
                                     ui.markWord(i, DebtUI.Color.GREEN)
                                     correctionBuffers.remove(i) // Point D
-                                    
+
                                     storyIndex = i + 1
                                     transcriptIndex++
                                     foundAhead = true
@@ -222,7 +222,7 @@ class Phase0Manager(
                         wordStates[storyIndex] = WordState.INCORRECT
                         correctionBuffers.getOrPut(storyIndex) { ArrayDeque() }
                         ui.markWord(storyIndex, DebtUI.Color.RED)
-                        ui.logMetric("phase0_mark_incorrect", "idx=${storyIndex}, story='${storyWords[storyIndex]}', transcript='${transcriptWord}'")
+                        ui.logMetric("mark_incorrect", "idx=${storyIndex}, story='${storyWords[storyIndex]}', transcript='${transcriptWord}'")
                         transcriptIndex++
                     }
                 }
@@ -346,7 +346,7 @@ class Phase0Manager(
         val score = WordMatchingUtils.getMatchScore(a, b)
         val threshold = if (isStrict) strictThresholds[mode]!! else thresholds[mode]!!
         val isMatch = score >= threshold
-        ui.logMetric("phase0_match_attempt", "story='${b}', transcript='${a}', score=${String.format("%.2f", score)}, threshold=${String.format("%.2f", threshold)}, strict=${isStrict}, match=${isMatch}")
+        ui.logMetric("match_attempt", "story='${b}', transcript='${a}', score=${String.format("%.2f", score)}, threshold=${String.format("%.2f", threshold)}, strict=${isStrict}, match=${isMatch}")
         return isMatch
     }
 
@@ -364,7 +364,7 @@ class Phase0Manager(
 }
 
 class CheapBackgroundCollector(
-    private val manager: Phase0Manager,
+    private val manager: SpeechAligner,
     private val mode: Mode = Mode.Intermediate
 ) {
     private val executor = Executors.newSingleThreadExecutor { r ->
@@ -378,7 +378,7 @@ class CheapBackgroundCollector(
                 // This should also use the normalized story words, but manager doesn't expose them.
                 // For now, it will use the original, which is a minor inconsistency.
                 val target = manager.storyWords.getOrNull(debtIndex) ?: return@execute
-                for (tk in bufferSnapshot.asReversed()) { 
+                for (tk in bufferSnapshot.asReversed()) {
                     val quickScore = WordMatchingUtils.getMatchScore(tk.text, target)
                     if (quickScore >= quickThreshold && tk.confidence >= 0.2f) {
                         manager.requestStrictReeval(debtIndex, tk)

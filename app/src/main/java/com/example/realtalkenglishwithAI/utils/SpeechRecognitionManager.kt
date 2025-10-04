@@ -186,7 +186,7 @@ class SpeechRecognitionManager(
             if (isPerformingGracefulRestart && error == SpeechRecognizer.ERROR_CLIENT) {
                 Log.d(TAG, "Graceful restart: Ignored expected ERROR_CLIENT. Restarting after delay.")
                 isPerformingGracefulRestart = false
-                mainHandler.postDelayed({ restartListeningLoop() }, 450L) // Crucial delay
+                mainHandler.postDelayed({ restartListeningLoop() }, 250L) // Crucial delay
                 return
             }
             isPerformingGracefulRestart = false // Reset flag on any other error
@@ -206,7 +206,7 @@ class SpeechRecognitionManager(
                     return
                 }
                 // Otherwise, just retry after a short delay.
-                mainHandler.postDelayed({ restartListeningLoop() }, 500L)
+                mainHandler.postDelayed({ restartListeningLoop() }, 300L)
                 return
             }
 

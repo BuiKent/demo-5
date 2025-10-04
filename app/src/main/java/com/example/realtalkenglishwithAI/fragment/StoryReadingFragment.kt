@@ -38,7 +38,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     // --- Hybrid System & Dependencies ---
     private lateinit var featureFlags: LocalFeatureFlagController
     private lateinit var metrics: MetricsEmitter
-    private var phase0Manager: Phase0Manager? = null
+    private var speechAligner: SpeechAligner? = null
     private var strictManager: StrictCorrectionManager? = null
 
     // --- Speech Recognition ---
@@ -134,7 +134,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
             else -> DebtMode.Intermediate
         }
 
-        phase0Manager = Phase0Manager(storyWords, this, currentMode).apply {
+        speechAligner = SpeechAligner(storyWords, this, currentMode).apply {
             if (currentMode == DebtMode.Advanced) {
                 if (featureFlags.isEnabled(FeatureFlag.CHEAP_COLLECTOR)) {
                     this.collector = CheapBackgroundCollector(this, currentMode)
@@ -150,7 +150,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
 
     override fun onDestroyView() {
         super.onDestroyView()
-        phase0Manager?.reset()
+        speechAligner?.reset()
         if (this::speechManager.isInitialized) {
             speechManager.destroy()
         }
@@ -162,14 +162,14 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     override fun onPartialResults(transcript: String) {
         activity?.runOnUiThread {
             val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
-            phase0Manager?.onRecognizedWords(tokens)
+            speechAligner?.onRecognizedWords(tokens)
         }
     }
 
     override fun onFinalResults(transcript: String) {
         activity?.runOnUiThread {
             val tokens = transcript.split(Regex("\\s+")).filter { it.isNotBlank() }.map { RecognizedToken(it) }
-            phase0Manager?.onRecognizedWords(tokens)
+            speechAligner?.onRecognizedWords(tokens)
         }
     }
 
@@ -270,7 +270,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
     }
 
     private fun resetAllWordStatesAndColors() {
-        phase0Manager?.reset()
+        speechAligner?.reset()
         initializeHybridSystem()
         updateStoryWordFocus(-1) // Reset focus
         allWordInfosInStory.forEach { info ->
@@ -291,7 +291,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         // --- Xóa highlight khỏi từ cũ ---
         if (oldFocusIndex != -1) {
             allWordInfosInStory.getOrNull(oldFocusIndex)?.let { oldWord ->
-                val state = phase0Manager?.wordStates?.getOrNull(oldFocusIndex)
+                val state = speechAligner?.wordStates?.getOrNull(oldFocusIndex)
                 val color = when (state) {
                     WordState.CORRECT -> colorCorrectWord
                     WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
@@ -307,7 +307,7 @@ class StoryReadingFragment : Fragment(), SpeechRecognitionManager.SpeechRecognit
         // --- Thêm highlight cho từ mới ---
         if (newFocusGlobalIndex != -1) {
             allWordInfosInStory.getOrNull(newFocusGlobalIndex)?.let { newWord ->
-                val state = phase0Manager?.wordStates?.getOrNull(newFocusGlobalIndex)
+                val state = speechAligner?.wordStates?.getOrNull(newFocusGlobalIndex)
                 val color = when (state) {
                     WordState.CORRECT -> colorCorrectWord
                     WordState.INCORRECT, WordState.SKIPPED -> colorIncorrectWord
