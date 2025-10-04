@@ -21,11 +21,9 @@ import com.example.realtalkenglishwithAI.R
 import com.example.realtalkenglishwithAI.databinding.FragmentStoryReadingBinding
 import com.example.realtalkenglishwithAI.ui.composables.MicFab
 import com.example.realtalkenglishwithAI.ui.composables.StoryContent
-import com.example.realtalkenglishwithAI.utils.DebtUI
-import com.example.realtalkenglishwithAI.utils.RecognizedToken
-import com.example.realtalkenglishwithAI.utils.SpeechAligner
-import com.example.realtalkenglishwithAI.utils.SpeechRecognitionManager
+import com.example.realtalkenglishwithAI.utils.*
 import com.example.realtalkenglishwithAI.viewmodel.StoryReadingViewModel
+import com.example.realtalkenglishwithAI.utils.Mode as DebtMode
 
 class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
     SpeechRecognitionManager.SpeechRecognitionManagerListener, DebtUI {
@@ -38,13 +36,15 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
 
     private var speechRecognitionManager: SpeechRecognitionManager? = null
     private var speechAligner: SpeechAligner? = null
+    private var strictManager: StrictCorrectionManager? = null
     private lateinit var prefs: SharedPreferences
+    private var difficultyLevel = 1 // 0: Beginner, 1: Intermediate, 2: Advanced
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
         if (isGranted) {
-            setupStoryAndManagers()
+            handleRecordAction()
         } else {
             showToast("Permission for microphone is required.")
         }
@@ -54,10 +54,12 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
         super.onViewCreated(view, savedInstanceState)
         _binding = FragmentStoryReadingBinding.bind(view)
 
-        prefs = requireContext().getSharedPreferences("realtalk_prefs", Context.MODE_PRIVATE)
-        
-        // Set toolbar title from arguments
+        prefs = requireActivity().getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        difficultyLevel = prefs.getInt("DIFFICULTY_LEVEL", 1)
+
         (activity as? AppCompatActivity)?.supportActionBar?.title = args.storyTitle
+
+        setupSpeechManager()
 
         binding.composeFabContainer.setContent {
             val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
@@ -77,7 +79,7 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
                 requireContext(),
                 Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED -> {
-                setupStoryAndManagers()
+                initializeSystems()
             }
 
             else -> {
@@ -86,21 +88,34 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
         }
     }
 
-    private fun setupStoryAndManagers() {
+    private fun setupSpeechManager() {
+        speechRecognitionManager = SpeechRecognitionManager(requireContext(), this, prefs)
+    }
+
+    private fun initializeSystems() {
         if (speechAligner != null) return
 
-        // Use story content from arguments
         val storyText = args.storyContent
         val storyWords = storyText.split(Regex("\\s+")).filter { it.isNotBlank() }
 
         viewModel.setWords(storyText)
-        speechAligner = SpeechAligner(storyWords, this)
 
-        if (speechRecognitionManager == null) {
-            speechRecognitionManager = SpeechRecognitionManager(requireContext(), this, prefs)
+        val currentMode = when(difficultyLevel) {
+            0 -> DebtMode.Beginner
+            1 -> DebtMode.Intermediate
+            2 -> DebtMode.Advanced
+            else -> DebtMode.Intermediate
         }
 
-        speechRecognitionManager?.updateBiasingStrings(storyWords)
+        speechAligner = SpeechAligner(storyWords, this, currentMode).apply {
+            if (currentMode == DebtMode.Advanced) {
+                // In a real scenario, you might have a feature flag check here
+                this.collector = CheapBackgroundCollector(this, currentMode)
+                this@StoryReadingFragment.strictManager = StrictCorrectionManager()
+                this.strictManager = this@StoryReadingFragment.strictManager
+            }
+        }
+        logMetric("system_initialized", "mode=${currentMode.name}, words=${storyWords.size}")
     }
 
     private fun handleRecordAction() {
@@ -141,6 +156,8 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
         viewModel.setRecording(false)
     }
 
+    // --- DebtUI Interface Implementation ---
+
     override fun markWord(index: Int, color: DebtUI.Color) {
         val colorResId = when (color) {
             DebtUI.Color.GREEN -> R.color.word_correct
@@ -151,14 +168,18 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
         viewModel.updateWordColor(index, composeColor)
     }
 
+    override fun showDebtMarker(index: Int) {
+        // This can be mapped to a specific UI state in the ViewModel if needed
+        // For now, we can log it.
+        logMetric("show_debt_marker", "index=$index")
+    }
+
+    override fun hideDebtMarker(index: Int) {
+        logMetric("hide_debt_marker", "index=$index")
+    }
+
     override fun onAdvanceCursorTo(index: Int) {
         viewModel.setWordFocus(index)
-    }
-
-    override fun showDebtMarker(index: Int) { /* For later */
-    }
-
-    override fun hideDebtMarker(index: Int) { /* For later */
     }
 
     override fun logMetric(key: String, value: Any) {
@@ -173,6 +194,7 @@ class StoryReadingFragment : Fragment(R.layout.fragment_story_reading),
         super.onDestroyView()
         speechRecognitionManager?.destroy()
         speechAligner?.shutdown()
+        strictManager?.shutdown()
         _binding = null
     }
 }
